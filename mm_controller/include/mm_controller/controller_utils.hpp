@@ -86,8 +86,14 @@ public:
 
 		for(int i = 0; i < mani_dof_; ++i){
 			// FIXME joint_state must be sent in specific order: 
-			joint_p(i) = joint_state_msg.position[i];
-			joint_v(i) = joint_state_msg.velocity[i];
+			if(i < (int)joint_state_msg.position.size()){
+				joint_p(i) = joint_state_msg.position[i];
+			}
+			if(i < (int)joint_state_msg.velocity.size()){
+				joint_v(i) = joint_state_msg.velocity[i];
+			}else{
+				joint_v(i) = 0.0;
+			}
 		}
 	}
 };

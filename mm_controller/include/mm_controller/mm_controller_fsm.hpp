@@ -50,6 +50,8 @@ private:
 	State_t fsm_state_; // Should only be changed in PX4CtrlFSM::process() function!
 	Exec_Traj_State_t exec_traj_state_;
 	Eigen::VectorXd init_theta_;
+	bool capture_startup_standby_;
+	bool startup_standby_captured_;
 	bool init_gripper_close_;
 	int last_singul_;
 

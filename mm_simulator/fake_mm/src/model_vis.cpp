@@ -11,6 +11,9 @@ namespace model_vis{
         /*  param  */
         nh.param("mm/manipulator_dof", manipulator_dof_, -1);
         
+        bool publish_tf = true;
+        nh.param("publish_tf", publish_tf, true);
+        
         mm_state_.setParam(manipulator_dof_);
         his_traj_.clear();
         
@@ -42,7 +45,9 @@ namespace model_vis{
         odom_sub_               = nh.subscribe("odometry", 1, &ModelManager::odomCallback, this);
         vis_his_traj_pub_       = nh.advertise<visualization_msgs::Marker>("mm_his_traj", 100, true);
 
-        tf_timer_ = nh.createTimer(ros::Duration(0.01), &ModelManager::tfTimerCallback, this);
+        if(publish_tf) {
+            tf_timer_ = nh.createTimer(ros::Duration(0.01), &ModelManager::tfTimerCallback, this);
+        }
 
         std::vector<Eigen::Vector3d> car_pts;
         mm_config_->getCarPts(Eigen::Vector3d(0, 0, 0), car_pts, Eigen::Vector3d(0, 0, 0));
@@ -96,10 +101,10 @@ namespace model_vis{
     void ModelManager::jointStateCallback(const sensor_msgs::JointState::ConstPtr& state){
         have_mani_odom_ = true;
         mm_state_.feed_joint(state);
-        if(have_car_odom_){
-            mm_config_->visMM(vis_mm_pub_, "vis_mm_odom", 0, -0.9, Eigen::Vector3d(mm_state_.car_p(0), mm_state_.car_p(1), mm_state_.car_yaw), mm_state_.joint_p, gripper_state_);
-            mm_config_->visMMCheckBall(vis_mm_check_ball_pub_, "vis_mm_check_ball", 0, 0.7, Eigen::Vector3d(mm_state_.car_p(0), mm_state_.car_p(1), mm_state_.car_yaw), mm_state_.joint_p);
-        }
+        // Collision model is published only from odomCallback to keep
+        // car pose in sync with odometry.  Publishing here with a stale
+        // car_p would make the collision markers lag behind the URDF (which
+        // uses TF2-interpolated poses).
     }
 
     void ModelManager::gripperStateCallback(const std_msgs::Bool::ConstPtr& state){

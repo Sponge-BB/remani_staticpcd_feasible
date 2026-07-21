@@ -14,6 +14,8 @@ MMControllerFSM::MMControllerFSM(const ros::NodeHandle& nh) : nh_(nh){
         init_theta_(i) = init_state[i + mobile_base_dof_] / 180.0 * M_PI;
     }
 	nh.getParam("fsm/init_gripper_close", init_gripper_close_);
+	nh.param("fsm/capture_startup_standby", capture_startup_standby_, false);
+	startup_standby_captured_ = false;
 
 	last_singul_ = 0;
 
@@ -59,6 +61,11 @@ void MMControllerFSM::process(){
 	static bool is_first_time = true;
 	if(is_first_time){
 		is_first_time = false;
+		if(capture_startup_standby_ && state_data.have_mani_){
+			init_theta_ = state_data.joint_p;
+			startup_standby_captured_ = true;
+			ROS_INFO_STREAM("[MMctrl] Capture startup arm stand-by pose: " << init_theta_.transpose());
+		}
 		update_stay_state(false);
 		std_msgs::Bool gripper_cmd;
 		gripper_cmd.data = init_gripper_close_;
@@ -146,11 +153,9 @@ void MMControllerFSM::CMD_CTRL_process()
 					// tracking the end point of the trajectory
 					// the hover pose is the end point of the trajectory
 					auto & traj_info = trajectory_data.singul_traj_data.singul_traj.back().traj;
-					int singul = trajectory_data.singul_traj_data.singul_traj.back().singul;
 					stay_joint_ = traj_info.getJuncPos(traj_info.getPieceNum()).tail(manipulator_dof_);
 					stay_pos_ = traj_info.getJuncPos(traj_info.getPieceNum()).head(mobile_base_dof_);
-					Eigen::Vector2d stay_vel_ = traj_info.getJuncVel(traj_info.getPieceNum()).head(mobile_base_dof_);
-					stay_yaw_ = atan2(singul * stay_vel_(1), singul * stay_vel_(0));
+					stay_yaw_ = state_data.car_yaw;
 				}else{
 					update_stay_state(false);
 				}
@@ -183,7 +188,6 @@ void MMControllerFSM::CMD_CTRL_process()
 void MMControllerFSM::update_stay_state(bool mani_goto_init){
 	if(mani_goto_init){
 		stay_joint_ = init_theta_;
-		for(int i = 0; i < manipulator_dof_; ++i) stay_joint_[i] = init_theta_[i];
 	}else if(state_data.have_mani_){
 		stay_joint_ = state_data.joint_p;
 	}
@@ -205,11 +209,12 @@ void MMControllerFSM::publish_ctrl_cmd(const ros::Time &stamp){
 	car_cmd.linear.z = cmd_data.car_true_cmd(2); // yaw
 	car_cmd.angular.x = cmd_data.car_true_cmd(3); //vx
 	car_cmd.angular.y = cmd_data.car_true_cmd(4); //vy
-	car_cmd.angular.z = 0.0;
+	car_cmd.angular.z = cmd_data.car_omega_cmd;
 
 	control_msgs::JointTrajectoryControllerState joint_cmd;
 	joint_cmd.header.stamp = stamp;
 	for(int i = 0; i < manipulator_dof_; ++i){
+ 		joint_cmd.joint_names.push_back("joint" + std::to_string(i + 1));
 		joint_cmd.desired.positions.push_back(cmd_data.joint_pos_cmd(i));
 		joint_cmd.desired.velocities.push_back(cmd_data.joint_vel_cmd(i));
 		joint_cmd.desired.effort.push_back(cmd_data.joint_effort_cmd(i));
@@ -236,17 +241,25 @@ void MMControllerFSM::cal_traj_ctrl_input(double duration){
 	Eigen::VectorXd vel = trajectory_data.singul_traj_data.getVel(duration);
 	Eigen::VectorXd acc = trajectory_data.singul_traj_data.getAcc(duration);
 
-	double yaw = state_data.car_yaw;
-	if(last_singul_ == -1){
-		yaw += M_PI;
-	}
 	// true value
 	cmd_data.car_true_cmd.resize(5);
 	cmd_data.car_true_cmd(0) = pos(0);
 	cmd_data.car_true_cmd(1) = pos(1);
-	cmd_data.car_true_cmd(2) = atan2(last_singul_ * vel(1), last_singul_ * vel(0));
+	if (vel.head(mobile_base_dof_).squaredNorm() > 1e-6)
+		cmd_data.car_true_cmd(2) = atan2(last_singul_ * vel(1), last_singul_ * vel(0));
+	else
+		cmd_data.car_true_cmd(2) = state_data.car_yaw;
 	cmd_data.car_true_cmd(3) = vel(0);
 	cmd_data.car_true_cmd(4) = vel(1);
+
+	// desired angular velocity: omega = (vx*ay - vy*ax) / (vx^2+vy^2)
+	{
+		double v2 = vel(0) * vel(0) + vel(1) * vel(1);
+		if (v2 > 1e-6)
+			cmd_data.car_omega_cmd = (vel(0) * acc(1) - vel(1) * acc(0)) / v2;
+		else
+			cmd_data.car_omega_cmd = 0.0;
+	}
 
 	cmd_data.joint_pos_cmd = pos.tail(manipulator_dof_);
 	cmd_data.joint_vel_cmd = vel.tail(manipulator_dof_);
@@ -260,6 +273,7 @@ void MMControllerFSM::cal_stay_ctrl_input(){
 	cmd_data.car_true_cmd(0) = stay_pos_(0);
 	cmd_data.car_true_cmd(1) = stay_pos_(1);
 	cmd_data.car_true_cmd(2) = stay_yaw_;
+	cmd_data.car_omega_cmd = 0.0;
 
 	cmd_data.joint_pos_cmd = stay_joint_;
 	cmd_data.joint_vel_cmd.setZero();
