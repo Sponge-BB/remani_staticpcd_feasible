@@ -222,8 +222,13 @@
        对接真实 Livox MID360 激光雷达数据 — 话题转化与点云滤波
        ========================================================= -->
 
-  <!-- 0x. MID360 CustomMsg → PointCloud2 转换（FAST-LIO2 需要 CustomMsg，过滤管线需要 PointCloud2） -->
-  <node pkg="mm_remani" type="custom_to_pcl.py" name="custom_to_pcl" output="log" />
+  <!-- 0x. C++ bridge: retain the scan stamp and keep only the newest frame. -->
+  <node pkg="mm_remani" type="livox_custom_to_pcl" name="custom_to_pcl" output="log">
+    <param name="input_topic" value="/livox/lidar" />
+    <param name="output_topic" value="/livox/lidar_pcl2" />
+    <param name="subscriber_queue_size" value="1" />
+    <param name="publisher_queue_size" value="1" />
+  </node>
 
   <!-- 0. nodelet 管理器 -->
   <node pkg="nodelet" type="nodelet" name="pcl_manager_filter" args="manager" output="log" />
@@ -234,6 +239,7 @@
   <node pkg="nodelet" type="nodelet" name="passthrough_z" args="load pcl/PassThrough pcl_manager_filter" output="log">
     <remap from="~input" to="/livox/lidar_pcl2" />
     <remap from="~output" to="/livox/lidar_no_ground" />
+    <param name="max_queue_size" value="1" />
     <param name="filter_field_name" value="z" />
     <param name="filter_limit_min" value="0.01" /> <!-- 设置最低高度阈值，低于此值认为是地面，此值根据实际偏置调节 -->
     <param name="filter_limit_max" value="1.55" />   <!-- 设置最高有效高度 -->
@@ -244,6 +250,7 @@
   <node pkg="nodelet" type="nodelet" name="crop_box_filter" args="load pcl/CropBox pcl_manager_filter" output="log">
     <remap from="~input" to="/livox/lidar_no_ground" />
     <remap from="~output" to="/velodyne_points" />
+    <param name="max_queue_size" value="1" />
 
     <!-- 这里的过滤框尺寸表示机器人本体（以及可能造成干扰的近处连杆）在雷达视野内的位置。请根据实车尺寸调整 -->
     <param name="min_x" value="-0.8" />  <!-- 雷达后方 -->

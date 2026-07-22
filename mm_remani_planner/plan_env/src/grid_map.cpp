@@ -172,7 +172,9 @@ void GridMap::initMap(ros::NodeHandle &nh)
   /* init callback */
   
   depth_sub_.reset(new message_filters::Subscriber<sensor_msgs::Image>(node_, "grid_map/depth", 50));
-  cloud_sub_.reset(new message_filters::Subscriber<sensor_msgs::PointCloud2>(node_, "grid_map/cloud", 50));
+  // This is the live LiDAR path. A deep queue makes obstacle observations stale
+  // under load, while the static global-map subscription below remains unchanged.
+  cloud_sub_.reset(new message_filters::Subscriber<sensor_msgs::PointCloud2>(node_, "grid_map/cloud", 1));
   // extrinsic_sub_ = node_.subscribe<nav_msgs::Odometry>(
   //     "/vins_estimator/extrinsic", 10, &GridMap::extrinsicCallback, this); //sub
   
@@ -193,7 +195,7 @@ void GridMap::initMap(ros::NodeHandle &nh)
     //     SyncPolicyImageOdom(100), *depth_sub_, *odom_sub_));
     // sync_image_odom_->registerCallback(boost::bind(&GridMap::depthOdomCallback, this, _1, _2));
     sync_cloud_odom_.reset(new message_filters::Synchronizer<SyncPolicyCloudOdom>(
-        SyncPolicyCloudOdom(100), *cloud_sub_, *odom_sub_));
+        SyncPolicyCloudOdom(5), *cloud_sub_, *odom_sub_));
     sync_cloud_odom_->registerCallback(boost::bind(&GridMap::cloudOdomCallback, this, _1, _2));
   }
   

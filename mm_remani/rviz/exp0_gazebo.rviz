@@ -113,7 +113,7 @@ Visualization Manager:
               Min Color: 0; 0; 0
               Name: simulation_map
               Position Transformer: XYZ
-              Queue Size: 10
+              Queue Size: 1
               Selectable: true
               Size (Pixels): 1.2999999523162842
               Size (m): 0.02500000037252903
@@ -277,7 +277,7 @@ Visualization Manager:
       Min Color: 0; 0; 0
       Name: PointCloud2
       Position Transformer: XYZ
-      Queue Size: 10
+      Queue Size: 1
       Selectable: true
       Size (Pixels): 3
       Size (m): 0.009999999776482582
