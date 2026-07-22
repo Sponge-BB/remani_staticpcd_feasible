@@ -119,6 +119,7 @@ class KinoAstar{
     double traj_gear_switch_penalty_;
     double traj_steer_penalty_;
     double traj_steer_change_penalty_;
+    bool allow_reverse_;
     
     double oneshot_check_len_;
     double grid_interval_;

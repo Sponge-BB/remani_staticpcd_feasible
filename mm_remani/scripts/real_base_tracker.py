@@ -50,6 +50,7 @@ class RealBaseTracker:
         # 最大限幅将从统配文件 (`real_speed.yaml`) 中的参数服务器拉取
         self.max_v = rospy.get_param('~tracker_max_v', 0.6)   # 最大线速度
         self.max_w = rospy.get_param('~tracker_max_w', 1.5)   # 最大角速度
+        self.allow_reverse = rospy.get_param('~allow_reverse', False)
 
         # 控制循环频率 (50ms = 20Hz)
         rospy.Timer(rospy.Duration(0.05), self.control_loop)
@@ -126,6 +127,12 @@ class RealBaseTracker:
         if cmd.linear.x < -self.max_v: cmd.linear.x = -self.max_v
         if cmd.angular.z > self.max_w: cmd.angular.z = self.max_w
         if cmd.angular.z < -self.max_w: cmd.angular.z = -self.max_w
+
+        # The real base is configured for forward-only motion.  This remains a
+        # final safety guard if an old trajectory or another publisher requests reverse.
+        if not self.allow_reverse and cmd.linear.x < 0.0:
+            rospy.logwarn_throttle(1.0, "Blocked reverse cmd_vel request")
+            cmd.linear.x = 0.0
 
         # 下发给底盘驱动节点
         self.cmd_pub.publish(cmd)

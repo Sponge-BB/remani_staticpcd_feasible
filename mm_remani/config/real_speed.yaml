@@ -34,6 +34,8 @@ remani_planner_node:
   search:
     # Kino-A* 最大搜索时间 (秒)，适配 0.4s 重规划预算
     max_seach_time: 0.9
+    # 实车只允许前进；Kino-A* 不再扩展倒车控制，one-shot 使用 Dubins 曲线
+    allow_reverse: false
 
   # --- ESDF 地图障碍物膨胀 ---
   grid_map:
@@ -55,3 +57,5 @@ real_base_tracker:
   # 铁律：Tracker 的速度极限必须比规划出的车速大约大 15%~20%
   tracker_max_v: 0.6   # 底盘绝对最大直线追赶速度 (m/s)
   tracker_max_w: 1.5   # 底盘绝对最大转向极速 (rad/s)
+  # 规划异常或旧轨迹请求倒车时，作为底盘前的最后一道保护
+  allow_reverse: false

@@ -32,6 +32,7 @@ void KinoAstar::setParam(ros::NodeHandle& nh, const std::shared_ptr<GridMap> &en
   nh.param("search/traj_gear_switch_penalty", traj_gear_switch_penalty_, 15.0);
   nh.param("search/traj_steer_penalty", traj_steer_penalty_, 0.5);
   nh.param("search/traj_steer_change_penalty", traj_steer_change_penalty_, 0.0);
+  nh.param("search/allow_reverse", allow_reverse_, true);
   nh.param("search/max_arc", max_arc_, 0.9);
   nh.param("search/oneshot_check_len", oneshot_check_len_, 0.2);
   
@@ -72,13 +73,15 @@ void KinoAstar::setParam(ros::NodeHandle& nh, const std::shared_ptr<GridMap> &en
   shotptrindex_ = -1;
   shotptr_list_.clear();
 
-  // shotptr_list_.push_back(std::make_shared<ompl::base::DubinsStateSpace>(0.2));
-  // shotptr_list_.push_back(std::make_shared<ompl::base::DubinsStateSpace>(0.1));
-  // shotptr_list_.push_back(std::make_shared<ompl::base::DubinsStateSpace>(0.05));
-  
-  shotptr_list_.push_back(std::make_shared<ompl::base::ReedsSheppStateSpace>(0.4));
-  shotptr_list_.push_back(std::make_shared<ompl::base::ReedsSheppStateSpace>(0.2));
-  shotptr_list_.push_back(std::make_shared<ompl::base::ReedsSheppStateSpace>(0.1));
+  if(allow_reverse_){
+    shotptr_list_.push_back(std::make_shared<ompl::base::ReedsSheppStateSpace>(0.4));
+    shotptr_list_.push_back(std::make_shared<ompl::base::ReedsSheppStateSpace>(0.2));
+    shotptr_list_.push_back(std::make_shared<ompl::base::ReedsSheppStateSpace>(0.1));
+  }else{
+    shotptr_list_.push_back(std::make_shared<ompl::base::DubinsStateSpace>(0.4));
+    shotptr_list_.push_back(std::make_shared<ompl::base::DubinsStateSpace>(0.2));
+    shotptr_list_.push_back(std::make_shared<ompl::base::DubinsStateSpace>(0.1));
+  }
 
   mani_sample_.reset(new mani_sample::SampleMani);
   mani_sample_->setParam(nh, mm_config_);
@@ -548,7 +551,7 @@ int KinoAstar::search(Eigen::VectorXd &start_state, const Eigen::VectorXd &end_s
     double res_steer = 0.5;
     double res_arc = 0.5;
     if(!initsearch){
-      if(start_state_[3]>0){
+      if(allow_reverse_ || start_state_[3] >= 0.0){
         for(double arc = 1.0 * grid_interval_; arc <= 2.0 * grid_interval_ + 1e-3; arc += 1.0 * grid_interval_){
           if(fabs(arc) < 1.0e-2){
             continue;
@@ -567,7 +570,8 @@ int KinoAstar::search(Eigen::VectorXd &start_state, const Eigen::VectorXd &end_s
       }
       initsearch = true;
     }else{
-      for (double arc = -max_arc_; arc <= max_arc_ + 1e-3; arc += res_arc * max_arc_){
+      const double min_arc = allow_reverse_ ? -max_arc_ : res_arc * max_arc_;
+      for (double arc = min_arc; arc <= max_arc_ + 1e-3; arc += res_arc * max_arc_){
         if(fabs(arc) < 1.0e-2){
           continue;
         }
