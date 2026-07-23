@@ -29,8 +29,9 @@ remani_planner_node:
     thresh_no_replan_meter: 1.0
     # 紧急停车时间窗口 (秒)，碰撞距离<此值时触发急停
     emergency_time: 1
-    # 手动 2D 导航期间保持当前机械臂姿态；到达目标后仍按原策略回待命位
+    # 手动 2D 导航全程保持当前机械臂姿态，避免在目标点追加原地收臂轨迹
     manual_target_end_arm_standby: false
+    manual_restore_standby_after_goal: false
 
   # --- 搜索参数 ---
   search:
