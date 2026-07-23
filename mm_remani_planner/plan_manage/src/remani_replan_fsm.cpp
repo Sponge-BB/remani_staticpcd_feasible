@@ -387,8 +387,8 @@ namespace remani_planner
         t_temp = t_cur;
       }
 
-      // A bounded future scan catches new LiDAR obstacles before the robot
-      // reaches the current-pose collision point.
+      // A bounded future scan uses only real-time LiDAR occupancy, leaving
+      // the static PCD trajectory behavior unchanged.
       const bool time_for_future_check = last_global_plan_dynamic_check_time_.isZero() ||
                                          (now - last_global_plan_dynamic_check_time_).toSec() >=
                                              global_plan_dynamic_check_interval_;
@@ -397,7 +397,7 @@ namespace remani_planner
         const double check_end = std::min(info->duration, t_cur + global_plan_dynamic_lookahead_time_);
         for (double t_check = t_cur + global_plan_dynamic_check_time_step_; t_check <= check_end;
              t_check += global_plan_dynamic_check_time_step_){
-          if (planner_manager_->ploy_traj_opt_->checkCollision(*info, t_check, coll_type)){
+          if (planner_manager_->ploy_traj_opt_->checkDynamicObstacleCollision(*info, t_check, coll_type)){
             t_temp = t_check;
             occ = true;
             ROS_WARN_THROTTLE(1.0, "Future collision detected %.2f s ahead, triggering replan!", t_temp - t_cur);

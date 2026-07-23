@@ -140,6 +140,7 @@ namespace remani_planner
     inline const std::vector<poly_traj::MinSnapOpt<8>> *getMinSnapOptContainerPtr(void) { return &SnapOpt_container_; }
     inline int get_cps_num_prePiece_(){return cps_num_prePiece_;};
     bool checkCollision(const SingulTrajData &traj, double t, int &coll_type);
+    bool checkDynamicObstacleCollision(const SingulTrajData &traj, double t, int &coll_type);
 
     /* main planning API */
     bool OptimizeTrajectory_lbfgs(const std::vector<Eigen::MatrixXd> &iniStates_container, 

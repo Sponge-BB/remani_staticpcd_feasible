@@ -266,6 +266,7 @@ public:
   inline double getDistance(const Eigen::Vector3d& pos);
   inline double getDistance(const Eigen::Vector3i& id);
   double getPreciseDistance(const Eigen::Vector3d& pos);
+  double getDynamicObstacleDistance(const Eigen::Vector3d& pos, double max_search_distance);
   void getSurroundPts(const Eigen::Vector3d& pos, Eigen::Vector3d pts[2][2][2], Eigen::Vector3d& diff);
   void getSurroundDistance(Eigen::Vector3d pts[2][2][2], double dists[2][2][2]);
   void interpolateTrilinearEDT(double values[2][2][2], const Eigen::Vector3d& diff, double& value);

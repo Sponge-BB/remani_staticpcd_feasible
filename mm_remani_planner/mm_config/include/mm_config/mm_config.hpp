@@ -63,11 +63,14 @@ namespace remani_planner
         void setParam(ros::NodeHandle &nh, const std::shared_ptr<GridMap>& env);
         bool checkCarObsCollision(Eigen::Vector3d car_state, bool precise, bool safe, double &min_dist);
         bool checkManiObsCollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe, double &min_dist);
+        bool checkCarDynamicObsCollision(Eigen::Vector3d car_state, bool safe, double &min_dist);
+        bool checkManiDynamicObsCollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe, double &min_dist);
         bool checkCarManiCollision(Eigen::VectorXd mani_state, bool safe, double &min_dist);
         bool checkManiManiCollision(Eigen::VectorXd mani_state, bool safe, double &min_dist);
         bool checkManicollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe);
         bool checkcollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe);
         bool checkcollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe, int &coll_type /*0: car, 1: mani, 2: car-mani, 3: mani-mani*/);
+        bool checkDynamicObstacleCollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe, int &coll_type);
         void visMM(ros::Publisher &pub, std::string ns, int idx, double alpha, const Eigen::Vector3d &car_state, const Eigen::VectorXd &joint_state, const bool &gripper_close);
         void visMMCheckBall(ros::Publisher &pub, std::string ns, int idx, double alpha, const Eigen::Vector3d &car_state, const Eigen::VectorXd &joint_state);
         void getMMMarkerArray(visualization_msgs::MarkerArray &marker_array, std::string ns, int idx, double alpha, const Eigen::Vector3d &car_state, const Eigen::VectorXd &joint_state, const bool &gripper_close);

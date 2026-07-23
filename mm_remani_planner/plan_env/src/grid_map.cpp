@@ -1802,6 +1802,37 @@ double GridMap::getPreciseDistance(const Eigen::Vector3d& pos){
   return dist;
 }
 
+double GridMap::getDynamicObstacleDistance(const Eigen::Vector3d& pos, double max_search_distance){
+  if (!isInMap(pos))
+    return max_search_distance;
+
+  Eigen::Vector3i center_id;
+  posToIndex(pos, center_id);
+  const int search_step = std::max(0, static_cast<int>(std::ceil(max_search_distance * mp_.resolution_inv_))) + 1;
+  const double voxel_half_diagonal = 0.5 * std::sqrt(3.0) * mp_.resolution_;
+  double min_dist = max_search_distance;
+
+  for (int dx = -search_step; dx <= search_step; ++dx)
+    for (int dy = -search_step; dy <= search_step; ++dy)
+      for (int dz = -search_step; dz <= search_step; ++dz)
+      {
+        const Eigen::Vector3i id = center_id + Eigen::Vector3i(dx, dy, dz);
+        if (!isInMap(id))
+          continue;
+
+        const int idx = toAddress(id);
+        if (md_.static_occupancy_[idx] || md_.occupancy_buffer_[idx] <= mp_.min_occupancy_log_)
+          continue;
+
+        Eigen::Vector3d voxel_center;
+        indexToPos(id, voxel_center);
+        const double dist = std::max(0.0, (voxel_center - pos).norm() - voxel_half_diagonal);
+        min_dist = std::min(min_dist, dist);
+      }
+
+  return min_dist;
+}
+
 void GridMap::evaluateFirstGrad(const Eigen::Vector3d& pos,
                                 Eigen::Vector3d& grad){
   Eigen::Vector3d diff;

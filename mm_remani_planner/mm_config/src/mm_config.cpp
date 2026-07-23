@@ -674,6 +674,49 @@ bool MMConfig::checkManiObsCollision(Eigen::Vector3d car_state, Eigen::VectorXd 
     return false;
 }
 
+bool MMConfig::checkCarDynamicObsCollision(Eigen::Vector3d car_state, bool safe, double &min_dist){
+    std::vector<Eigen::Vector3d> car_pts;
+    getCarPts(car_state, car_pts);
+    const double safe_dist = (safe ? mobile_base_check_radius_ + car_safe_margin_ : mobile_base_check_radius_) + map_resolution_;
+    for(const auto &pt : car_pts){
+        const double dist = grid_map_->getDynamicObstacleDistance(pt, safe_dist);
+        if(dist < safe_dist){
+            min_dist = dist;
+            return true;
+        }
+    }
+    min_dist = safe_dist;
+    return false;
+}
+
+bool MMConfig::checkManiDynamicObsCollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe, double &min_dist){
+    Eigen::Matrix4d T_q = Eigen::Matrix4d::Identity();
+    T_q(0, 0) = cos(car_state(2));
+    T_q(0, 1) = -sin(car_state(2));
+    T_q(0, 3) = car_state(0);
+    T_q(1, 0) = sin(car_state(2));
+    T_q(1, 1) = cos(car_state(2));
+    T_q(1, 3) = car_state(1);
+    const double safe_dist = safe ? manipulator_thickness_ + mani_safe_margin_ : manipulator_thickness_;
+    Eigen::Matrix4d T_now = T_q * T_q_0_;
+    std::vector<Eigen::Matrix4d> T_joint, T_joint_grad_nouse;
+    getJointTrans(mani_state, T_joint, T_joint_grad_nouse);
+    for(int i = 0; i < manipulator_dof_; ++i){
+        T_now = T_now * T_joint[i];
+        const int pts_size = manipulator_link_pts_[i].cols();
+        for(int j = 0; j < pts_size; ++j){
+            const Eigen::Vector3d pt_on_link = (T_now * manipulator_link_pts_[i].col(j)).head(3);
+            const double dist = grid_map_->getDynamicObstacleDistance(pt_on_link, safe_dist);
+            if(dist < safe_dist){
+                min_dist = dist;
+                return true;
+            }
+        }
+    }
+    min_dist = safe_dist;
+    return false;
+}
+
 bool MMConfig::checkCarManiCollision(Eigen::VectorXd mani_state, bool safe, double &min_dist){
     double safe_dist = safe ? mobile_base_check_radius_ + manipulator_thickness_ + self_safe_margin_ : mobile_base_check_radius_ + manipulator_thickness_;
     std::vector<Eigen::Vector3d> car_pts;
@@ -760,6 +803,20 @@ bool MMConfig::checkManicollision(Eigen::Vector3d car_state, Eigen::VectorXd man
     if(checkManiManiCollision(mani_state, safe, min_dist)){
         return true;
     }
+    return false;
+}
+
+bool MMConfig::checkDynamicObstacleCollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe, int &coll_type){
+    double min_dist;
+    if(checkCarDynamicObsCollision(car_state, safe, min_dist)){
+        coll_type = 0;
+        return true;
+    }
+    if(checkManiDynamicObsCollision(car_state, mani_state, safe, min_dist)){
+        coll_type = 1;
+        return true;
+    }
+    coll_type = -1;
     return false;
 }
 

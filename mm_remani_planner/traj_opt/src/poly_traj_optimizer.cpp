@@ -437,6 +437,14 @@ namespace remani_planner
     return mm_config_->checkcollision(Eigen::Vector3d(pos(0), pos(1), yaw), pos.tail(manipulator_dof_), false, coll_type);
   }
 
+  bool PolyTrajOptimizer::checkDynamicObstacleCollision(const SingulTrajData &traj, double t, int &coll_type)
+  {
+    Eigen::VectorXd pos = traj.getPos(t);
+    double yaw = traj.getCarAngle(t);
+    return mm_config_->checkDynamicObstacleCollision(Eigen::Vector3d(pos(0), pos(1), yaw),
+                                                     pos.tail(manipulator_dof_), false, coll_type);
+  }
+
   /* callbacks by the L-BFGS optimizer */
   double PolyTrajOptimizer::costFunctionCallback(void *instance,
                                        const Eigen::VectorXd &x,
