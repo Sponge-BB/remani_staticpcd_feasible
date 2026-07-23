@@ -83,6 +83,9 @@ namespace remani_planner
     bool enable_fail_safe_;
     int last_end_id_;
     double replan_trajectory_time_;
+    double global_plan_dynamic_lookahead_time_;
+    double global_plan_dynamic_check_interval_;
+    double global_plan_dynamic_check_time_step_;
     int replan_fail_time_;
     int new_traj_fail_time_;
     int global_plan_max_failures_;
@@ -133,6 +136,7 @@ namespace remani_planner
     ros::Publisher reached_pub_, start_pub_;
 
     ros::Time t_last_Astar_;
+    ros::Time last_global_plan_dynamic_check_time_;
 
     int map_state_;
 

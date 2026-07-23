@@ -24,11 +24,19 @@ namespace remani_planner
     nh.param("fsm/emergency_time", emergency_time_, 1.0);
     nh.param("fsm/fail_safe", enable_fail_safe_, true);
     nh.param("fsm/replan_trajectory_time", replan_trajectory_time_, 0.0);
+    nh.param("fsm/global_plan_dynamic_lookahead_time", global_plan_dynamic_lookahead_time_, 2.0);
+    nh.param("fsm/global_plan_dynamic_check_interval", global_plan_dynamic_check_interval_, 0.1);
+    nh.param("fsm/global_plan_dynamic_check_time_step", global_plan_dynamic_check_time_step_, 0.05);
     nh.param("fsm/global_plan_max_failures", global_plan_max_failures_, 3);
     nh.param("fsm/global_plan_trial_times", global_plan_trial_times_, 3);
     nh.param("fsm/time_for_gripper", time_for_gripper_, -1.0);
     nh.param("fsm/global_plan", global_plan_, false);
     if(global_plan_) planning_horizen_ = 1.0e3;
+
+    global_plan_dynamic_lookahead_time_ = std::max(0.0, global_plan_dynamic_lookahead_time_);
+    global_plan_dynamic_check_interval_ = std::max(0.01, global_plan_dynamic_check_interval_);
+    global_plan_dynamic_check_time_step_ = std::max(0.01, global_plan_dynamic_check_time_step_);
+    last_global_plan_dynamic_check_time_ = ros::Time(0);
 
     nh.param("mm/mobile_base_dof", mobile_base_dim_, -1);
     nh.param("mm/manipulator_dof", manipulator_dim_, -1);
@@ -356,18 +364,15 @@ namespace remani_planner
     }
     /* ---------- check trajectory ---------- */
     constexpr double time_step = 0.01;
-    double t_cur = ros::Time::now().toSec() - info->start_time;
+    const ros::Time now = ros::Time::now();
+    double t_cur = now.toSec() - info->start_time;
     Eigen::VectorXd p_cur = info->getPos(t_cur);
     double t_temp = 0;
     bool occ = false;
     int coll_type;
 
     if (global_plan_) {
-      // Global plan mode: the trajectory was planned once against the static
-      // map, so it is safe.  Only check the CURRENT robot pose for collision.
-      // This prevents constant replanning triggered by nearby static obstacles
-      // ahead on the path.  Dynamic (real-time LiDAR) obstacles at the current
-      // pose will still trigger emergency stop.
+      // Keep current-pose checking at 100 Hz for emergency reaction.
       if (planner_manager_->ploy_traj_opt_->checkCollision(*info, t_cur, coll_type)){
         if(coll_type == 0){
           ROS_WARN_THROTTLE(2.0, "car collision at current time %f!", t_cur);
@@ -380,6 +385,25 @@ namespace remani_planner
         }
         occ = true;
         t_temp = t_cur;
+      }
+
+      // A bounded future scan catches new LiDAR obstacles before the robot
+      // reaches the current-pose collision point.
+      const bool time_for_future_check = last_global_plan_dynamic_check_time_.isZero() ||
+                                         (now - last_global_plan_dynamic_check_time_).toSec() >=
+                                             global_plan_dynamic_check_interval_;
+      if (!occ && global_plan_dynamic_lookahead_time_ > 0.0 && time_for_future_check){
+        last_global_plan_dynamic_check_time_ = now;
+        const double check_end = std::min(info->duration, t_cur + global_plan_dynamic_lookahead_time_);
+        for (double t_check = t_cur + global_plan_dynamic_check_time_step_; t_check <= check_end;
+             t_check += global_plan_dynamic_check_time_step_){
+          if (planner_manager_->ploy_traj_opt_->checkCollision(*info, t_check, coll_type)){
+            t_temp = t_check;
+            occ = true;
+            ROS_WARN_THROTTLE(1.0, "Future collision detected %.2f s ahead, triggering replan!", t_temp - t_cur);
+            break;
+          }
+        }
       }
     } else {
       // Local reactive mode: scan the entire remaining trajectory for collision.

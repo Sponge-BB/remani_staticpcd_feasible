@@ -29,6 +29,10 @@ remani_planner_node:
     thresh_no_replan_meter: 1.0
     # 紧急停车时间窗口 (秒)，碰撞距离<此值时触发急停
     emergency_time: 1
+    # 全局路径模式下，每 0.1 秒前视 2 秒轨迹以提前避开新出现的动态障碍物
+    global_plan_dynamic_lookahead_time: 2.0
+    global_plan_dynamic_check_interval: 0.1
+    global_plan_dynamic_check_time_step: 0.05
     # 手动 2D 导航全程保持当前机械臂姿态，避免在目标点追加原地收臂轨迹
     manual_target_end_arm_standby: false
     manual_restore_standby_after_goal: false
