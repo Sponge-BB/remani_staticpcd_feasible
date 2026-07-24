@@ -20,6 +20,8 @@ namespace remani_planner
     wei_mani_obs_ = wei_obs_ / 5.0;
     nh.param("optimization/weight_manipulator_self", wei_mani_self_, -1.0);
     nh.param("optimization/weight_manipulator_feasibility", wei_mani_feas_, -1.0);
+    nh.param("optimization/weight_manipulator_hold", wei_mani_hold_, 0.0);
+    wei_mani_hold_ = std::max(0.0, wei_mani_hold_);
 
     nh.param("optimization/dense_sample_resolution", dense_sample_resolution_, -1);
 
@@ -92,6 +94,14 @@ namespace remani_planner
     iniState_container_ = iniState_container;
     finState_container_ = finState_container;
     singul_container_ = singul_container;
+    mani_hold_enabled_ = false;
+    mani_hold_reference_.resize(0);
+    if(wei_mani_hold_ > 0.0 && manipulator_dof_ > 0 && !iniState_container_.empty() &&
+       !finState_container_.empty()){
+      mani_hold_reference_ = iniState_container_.front().col(0).tail(manipulator_dof_);
+      const Eigen::VectorXd end_arm = finState_container_.back().col(0).tail(manipulator_dof_);
+      mani_hold_enabled_ = (end_arm - mani_hold_reference_).norm() < 1e-3;
+    }
     variable_num_ = 0;
     SnapOpt_container_.clear();
     piece_num_container_.clear();
@@ -720,6 +730,18 @@ namespace remani_planner
           costs(0) += omg * step * cost_car;
           costs(1) += omg * step * cost_mani;
           costs(2) += omg * step * cost_self;
+        }
+
+        if(mani_hold_enabled_){
+          gradp.setZero();
+          const Eigen::VectorXd arm_error = pos.tail(manipulator_dof_) - mani_hold_reference_;
+          const double cost_mani_hold = wei_mani_hold_ * arm_error.squaredNorm();
+          gradp.tail(manipulator_dof_) = 2.0 * wei_mani_hold_ * arm_error;
+          gradViolaPc = beta0 * gradp.transpose();
+          gradViolaPt = alpha * gradp.transpose() * vel;
+          SnapOpt_container_[trajid].get_gdC().block(i * 8, 0, 8, traj_dim_) += omg * step * gradViolaPc;
+          gdT(i) += omg * (cost_mani_hold / K + step * gradViolaPt);
+          costs(5) += omg * step * cost_mani_hold;
         }
         
         // car feasibility

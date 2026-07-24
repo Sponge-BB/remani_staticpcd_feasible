@@ -33,6 +33,7 @@ void KinoAstar::setParam(ros::NodeHandle& nh, const std::shared_ptr<GridMap> &en
   nh.param("search/traj_steer_penalty", traj_steer_penalty_, 0.5);
   nh.param("search/traj_steer_change_penalty", traj_steer_change_penalty_, 0.0);
   nh.param("search/allow_reverse", allow_reverse_, true);
+  nh.param("search/require_forward_segment", require_forward_segment_, true);
   nh.param("search/max_arc", max_arc_, 0.9);
   nh.param("search/oneshot_check_len", oneshot_check_len_, 0.2);
   
@@ -73,15 +74,7 @@ void KinoAstar::setParam(ros::NodeHandle& nh, const std::shared_ptr<GridMap> &en
   shotptrindex_ = -1;
   shotptr_list_.clear();
 
-  if(allow_reverse_){
-    shotptr_list_.push_back(std::make_shared<ompl::base::ReedsSheppStateSpace>(0.4));
-    shotptr_list_.push_back(std::make_shared<ompl::base::ReedsSheppStateSpace>(0.2));
-    shotptr_list_.push_back(std::make_shared<ompl::base::ReedsSheppStateSpace>(0.1));
-  }else{
-    shotptr_list_.push_back(std::make_shared<ompl::base::DubinsStateSpace>(0.4));
-    shotptr_list_.push_back(std::make_shared<ompl::base::DubinsStateSpace>(0.2));
-    shotptr_list_.push_back(std::make_shared<ompl::base::DubinsStateSpace>(0.1));
-  }
+  configureMotionModel(allow_reverse_);
 
   mani_sample_.reset(new mani_sample::SampleMani);
   mani_sample_->setParam(nh, mm_config_);
@@ -123,6 +116,20 @@ void KinoAstar::reset(){
 KinoAstar::~KinoAstar(){
   for (int i = 0; i < allocate_num_; i++){
     delete path_node_pool_[i];
+  }
+}
+
+void KinoAstar::configureMotionModel(const bool allow_reverse){
+  allow_reverse_ = allow_reverse;
+  shotptr_list_.clear();
+  if(allow_reverse_){
+    shotptr_list_.push_back(std::make_shared<ompl::base::ReedsSheppStateSpace>(0.4));
+    shotptr_list_.push_back(std::make_shared<ompl::base::ReedsSheppStateSpace>(0.2));
+    shotptr_list_.push_back(std::make_shared<ompl::base::ReedsSheppStateSpace>(0.1));
+  }else{
+    shotptr_list_.push_back(std::make_shared<ompl::base::DubinsStateSpace>(0.4));
+    shotptr_list_.push_back(std::make_shared<ompl::base::DubinsStateSpace>(0.2));
+    shotptr_list_.push_back(std::make_shared<ompl::base::DubinsStateSpace>(0.1));
   }
 }
 
@@ -282,6 +289,20 @@ int KinoAstar::KinoAstarSearchAndGetSimplePath(const Eigen::VectorXd &start_pos,
     if(achieve_hori) break;
   }
   if(sample_succ){
+    const bool has_forward_segment = std::any_of(
+        singul_container.begin(), singul_container.end(),
+        [](const int singul) { return singul > 0; });
+    if(allow_reverse_ && require_forward_segment_ && !has_forward_segment){
+      ROS_WARN("[kino astar] rejected an all-reverse trajectory; retrying forward-only search.");
+      const bool reverse_was_enabled = allow_reverse_;
+      configureMotionModel(false);
+      const int forward_only_status = KinoAstarSearchAndGetSimplePath(
+          start_pos, start_vel, start_yaw, start_singul, start_gripper,
+          end_pos, end_vel, end_yaw, end_gripper, init_ctrl, continous_failures_count,
+          simple_path_container, yaw_list_container, singul_container, t_list_container);
+      configureMotionModel(reverse_was_enabled);
+      return forward_only_status;
+    }
     if(achieve_hori) return KinoAstar::REACH_HORIZON;
     else return KinoAstar::REACH_END;
   }else{

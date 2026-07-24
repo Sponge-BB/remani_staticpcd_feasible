@@ -65,6 +65,9 @@ namespace remani_planner
     int traj_num_;
     double non_singul_v_ = 0.01;
     bool opt_gear_ = true;
+    double wei_mani_hold_ = 0.0;
+    bool mani_hold_enabled_ = false;
+    Eigen::VectorXd mani_hold_reference_;
 
     std::shared_ptr<GridMap> grid_map_;
     poly_traj::MinSnapOpt<8> SnapOpt_;

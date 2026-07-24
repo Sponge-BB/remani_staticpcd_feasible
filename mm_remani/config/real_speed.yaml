@@ -41,8 +41,13 @@ remani_planner_node:
   search:
     # Kino-A* 最大搜索时间 (秒)，适配 0.4s 重规划预算
     max_seach_time: 0.9
-    # 实车只允许前进；Kino-A* 不再扩展倒车控制，one-shot 使用 Dubins 曲线
-    allow_reverse: false
+    # 允许短暂倒车调整姿态，但拒绝整条轨迹全为倒车的候选。
+    allow_reverse: true
+    require_forward_segment: true
+
+  optimization:
+    # 起终机械臂姿态相同时，软约束中间关节保持当前姿态；碰撞代价更高时仍可避让。
+    weight_manipulator_hold: 20.0
 
   # --- ESDF 地图障碍物膨胀 ---
   grid_map:

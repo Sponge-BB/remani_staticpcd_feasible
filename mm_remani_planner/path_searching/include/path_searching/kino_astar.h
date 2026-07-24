@@ -120,6 +120,7 @@ class KinoAstar{
     double traj_steer_penalty_;
     double traj_steer_change_penalty_;
     bool allow_reverse_;
+    bool require_forward_segment_;
     
     double oneshot_check_len_;
     double grid_interval_;
@@ -172,6 +173,8 @@ class KinoAstar{
     Eigen::Vector4d end_state_; // x y yaw vel
     double totalTrajTime;
     bool has_path_ = false;
+
+    void configureMotionModel(bool allow_reverse);
 
   public:
     mani_sample::SampleMani::Ptr mani_sample_;

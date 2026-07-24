@@ -78,7 +78,7 @@ namespace remani_planner
     singul_container.clear();
 
     /*** case 1: use A* initialization ***/
-    if (flag_first_call || flag_polyInit || true){
+    if (flag_first_call || flag_polyInit){
       // ROS_INFO("get init from search");
       flag_first_call = false;
       /* basic params */
