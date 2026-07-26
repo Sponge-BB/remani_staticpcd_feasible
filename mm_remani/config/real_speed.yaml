@@ -34,9 +34,10 @@ remani_planner_node:
     global_plan_dynamic_check_interval: 0.1
     global_plan_dynamic_check_time_step: 0.05
     global_plan_static_check_time_step: 0.1
-    # 手动 2D 导航全程保持当前机械臂姿态，避免在目标点追加原地收臂轨迹
+    # 手动 2D 导航主轨迹保持当前机械臂姿态；避障结束后再原地恢复待机位。
     manual_target_end_arm_standby: false
-    manual_restore_standby_after_goal: false
+    manual_restore_standby_after_goal: true
+    manual_restore_tolerance: 0.05
 
   # --- 搜索参数 ---
   search:
@@ -47,6 +48,10 @@ remani_planner_node:
     require_forward_segment: true
     # 桥下等场景给机械臂采样更多预算，避免找到底盘路线后机械臂无解。
     max_mani_search_time: 0.12
+    # 将关节余量纳入段时间分配，保证桥下避障动作能在底盘到达前完成。
+    manipulator_velocity_utilization: 0.60
+    manipulator_acceleration_utilization: 0.60
+    manipulator_time_safety_factor: 1.15
 
   optimization:
     # 起终机械臂姿态相同时，轻度偏好当前姿态，但给桥下避障留下足够调整空间。
@@ -76,3 +81,5 @@ real_base_tracker:
   tracker_max_w: 1.5   # 底盘绝对最大转向极速 (rad/s)
   # 规划异常或旧轨迹请求倒车时，作为底盘前的最后一道保护
   allow_reverse: false
+  # 规划器或控制器停止发布后，超时自动发布零速度。
+  command_timeout: 0.30

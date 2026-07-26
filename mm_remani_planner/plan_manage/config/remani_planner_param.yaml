@@ -30,6 +30,9 @@ search:
   max_loop_num: 5000         # Maximum number of RRT sampling times
   max_sample_time: 0.2       # Maximum time for whole-body RRT
   max_mani_search_time: 0.12 # Maximum time for manipulator search
+  manipulator_velocity_utilization: 0.60
+  manipulator_acceleration_utilization: 0.60
+  manipulator_time_safety_factor: 1.15
 
 optimization:
   weight_obstacle          : 50000.0  # Weight for obstacle
@@ -56,6 +59,7 @@ fsm:
   manual_work_arm_waypoint_id: 0
   manual_target_end_arm_standby: true
   manual_restore_standby_after_goal: true
+  manual_restore_tolerance: 0.05
   time_for_gripper: 0.05      # Time for the gripper to grip things between path points
 
   thresh_replan_time: 2.5     # Threshold for replanning time

@@ -1,6 +1,32 @@
 #include "path_searching/sample_mani_RRT.h"
 
+#include <algorithm>
+#include <cmath>
+
 namespace mani_sample{
+  std::vector<double> SampleMani::getOutputSegmentTimes(
+      const std::vector<Eigen::VectorXd> &mani_path,
+      const std::vector<double> &t_list) const {
+    std::vector<double> output_times = t_list;
+    if (mani_path.size() != t_list.size() + 1) {
+      return output_times;
+    }
+
+    const double available_velocity = std::max(
+        1e-3, max_joint_vel_ * manipulator_velocity_utilization_);
+    const double available_acceleration = std::max(
+        1e-3, max_joint_acc_ * manipulator_acceleration_utilization_);
+    for (size_t i = 0; i < t_list.size(); ++i) {
+      const double joint_delta = (mani_path[i + 1] - mani_path[i]).cwiseAbs().maxCoeff();
+      const double velocity_time = joint_delta / available_velocity;
+      const double acceleration_time = 2.0 * std::sqrt(joint_delta / available_acceleration);
+      output_times[i] = std::max(
+          output_times[i],
+          manipulator_time_safety_factor_ * std::max(velocity_time, acceleration_time));
+    }
+    return output_times;
+  }
+
   bool SampleMani::sampleManiSearch(const bool astar_succ, const Eigen::VectorXd &start_state, const Eigen::VectorXd &end_state,
                     const std::vector<Eigen::Vector3d> &car_state_list, const std::vector<Eigen::Vector3d> &car_state_list_check, 
                     const std::vector<double> &t_list, const std::vector<int> &singul_container, const int start_singul,// size = t_list.size()
@@ -23,6 +49,7 @@ namespace mani_sample{
     // ROS_ERROR("=====================1");
     if(mani_status && astar_succ){
       getTraj(mani_path);
+      const std::vector<double> output_t_list = getOutputSegmentTimes(mani_path, t_list);
       // ROS_ERROR("=====================1");
       int singul_now = singul_container[0];
       state_full.head(mobile_base_dof_) = car_state_list[0].head(mobile_base_dof_);
@@ -58,7 +85,7 @@ namespace mani_sample{
         state_full.tail(manipulator_dof_) = mani_path[i];
         simple_path.push_back(state_full);
         yaw_list.push_back(car_state_list[i](2));
-        t_list_temp.push_back(t_list[i - 1]);
+        t_list_temp.push_back(output_t_list[i - 1]);
       }
 
       // rrt_plan_->smoothTraj(simple_path, yaw_list, t_list_temp);
@@ -1257,9 +1284,16 @@ namespace mani_sample{
     nh.param("search/goal_rate", goal_rate_, 0.4);
     nh.param("search/max_loop_num", max_loop_num_, 500);
     nh.param("search/max_mani_search_time", max_mani_search_time_, 0.1);
+    nh.param("search/manipulator_velocity_utilization", manipulator_velocity_utilization_, 0.6);
+    nh.param("search/manipulator_acceleration_utilization", manipulator_acceleration_utilization_, 0.6);
+    nh.param("search/manipulator_time_safety_factor", manipulator_time_safety_factor_, 1.15);
     nh.param("optimization/self_safe_margin", self_safe_margin_, 0.1);
     nh.param("optimization/safe_margin_mani", safe_margin_mani_, 0.1);
     nh.param("mm/mobile_base_check_radius", mobile_base_check_radius_, 0.1);
+
+    manipulator_velocity_utilization_ = std::max(0.05, std::min(1.0, manipulator_velocity_utilization_));
+    manipulator_acceleration_utilization_ = std::max(0.05, std::min(1.0, manipulator_acceleration_utilization_));
+    manipulator_time_safety_factor_ = std::max(1.0, manipulator_time_safety_factor_);
 
     traj_dim_ = mobile_base_dof_ + manipulator_dof_;
 

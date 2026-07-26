@@ -100,6 +100,7 @@ namespace remani_planner
     bool has_default_arm_;
     bool default_arm_from_config_;
     bool manual_restore_standby_after_goal_;
+    double manual_restore_tolerance_;
     bool manual_use_work_arm_waypoint_;
     bool manual_target_end_arm_standby_;
     bool manual_restore_pending_;

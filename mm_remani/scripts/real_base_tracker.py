@@ -51,6 +51,9 @@ class RealBaseTracker:
         self.max_v = rospy.get_param('~tracker_max_v', 0.6)   # 最大线速度
         self.max_w = rospy.get_param('~tracker_max_w', 1.5)   # 最大角速度
         self.allow_reverse = rospy.get_param('~allow_reverse', False)
+        self.command_timeout = max(0.05, rospy.get_param('~command_timeout', 0.3))
+        self.target_stamp = rospy.Time(0)
+        rospy.on_shutdown(self.publish_stop)
 
         # 控制循环频率 (50ms = 20Hz)
         rospy.Timer(rospy.Duration(0.05), self.control_loop)
@@ -74,6 +77,10 @@ class RealBaseTracker:
         self.target_vy = msg.angular.y
         self.target_w  = msg.angular.z
         self.has_target = True
+        self.target_stamp = rospy.Time.now()
+
+    def publish_stop(self):
+        self.cmd_pub.publish(Twist())
 
     def normalize_angle(self, angle):
         while angle > math.pi:
@@ -84,6 +91,12 @@ class RealBaseTracker:
 
     def control_loop(self, event):
         if not self.has_odom or not self.has_target:
+            self.publish_stop()
+            return
+
+        if (rospy.Time.now() - self.target_stamp).to_sec() > self.command_timeout:
+            rospy.logwarn_throttle(1.0, "Trajectory command timed out; stopping base")
+            self.publish_stop()
             return
 
         # Target local feedforward velocity
@@ -105,8 +118,7 @@ class RealBaseTracker:
             err_msg = Float64MultiArray()
             err_msg.data = [dist, ex, ey, eyaw]
             self.err_pub.publish(err_msg)
-            cmd = Twist()
-            self.cmd_pub.publish(cmd)
+            self.publish_stop()
             return
 
         # ========================================================

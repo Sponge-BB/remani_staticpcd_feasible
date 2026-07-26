@@ -65,11 +65,13 @@ namespace remani_planner
       ROS_WARN("[FSM] fsm/init_state is missing or too short; arm stand-by will use first joint_state.");
     }
     nh.param("fsm/manual_restore_standby_after_goal", manual_restore_standby_after_goal_, true);
+    nh.param("fsm/manual_restore_tolerance", manual_restore_tolerance_, 0.05);
     nh.param("fsm/manual_use_work_arm_waypoint", manual_use_work_arm_waypoint_, false);
     nh.param("fsm/manual_target_end_arm_standby", manual_target_end_arm_standby_, true);
     nh.param("fsm/manual_work_arm_waypoint_id", manual_work_arm_waypoint_id_, 0);
     manual_restore_pending_ = false;
     manual_restore_running_ = false;
+    manual_restore_tolerance_ = std::max(0.0, manual_restore_tolerance_);
     
 
     traj_dim_ = mobile_base_dim_ + manipulator_dim_;
@@ -275,7 +277,7 @@ namespace remani_planner
             (mm_state_pos_.segment(mobile_base_dim_, manipulator_dim_) - default_arm_config_).norm() : 0.0;
         const bool need_manual_restore =
             manual_restore_standby_after_goal_ && has_default_arm_ && !manual_restore_running_ &&
-            manual_restore_pending_;
+            arm_standby_error > manual_restore_tolerance_;
 
         if(need_manual_restore){
           manual_restore_pending_ = false;

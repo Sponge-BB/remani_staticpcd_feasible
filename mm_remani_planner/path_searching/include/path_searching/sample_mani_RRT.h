@@ -76,6 +76,9 @@ namespace mani_sample {
     double goal_rate_;
     int max_loop_num_;
     double max_mani_search_time_;
+    double manipulator_velocity_utilization_;
+    double manipulator_acceleration_utilization_;
+    double manipulator_time_safety_factor_;
     Eigen::Matrix3d phi_; // state transit matrix
     Eigen::Matrix4d T_q_0_;
     std::vector<Eigen::Matrix4Xd> manipulator_link_pts_;
@@ -107,6 +110,8 @@ namespace mani_sample {
     void clearSubTree(ManiPathNodePtr &q);
     void mergeTrees(const ManiPathNodePtr &q1, const ManiPathNodePtr &q2);
     bool fullStateRepair();
+    std::vector<double> getOutputSegmentTimes(const std::vector<Eigen::VectorXd> &mani_path,
+                                              const std::vector<double> &t_list) const;
 
     public:
     remani_planner::RrtPlanning::Ptr rrt_plan_;
