@@ -100,7 +100,8 @@
 		<param name="grid_map/local_esdf_follow_odom"           value="true"/>
 		<param name="grid_map/global_map_full_esdf"             value="true"/>
 		<param name="grid_map/global_map_obstacles_inflation"   value="0.0"/>
-		<param name="grid_map/global_map_lidar_clear"           value="true"/>
+		<!-- The prebuilt PCD is a persistent collision layer. Live LiDAR is cleared separately. -->
+		<param name="grid_map/global_map_lidar_clear"           value="false"/>
 		<param name="grid_map/global_map_lidar_clear_radius"    value="0.0"/>
 		<param name="grid_map/global_map_lidar_clear_min_misses" value="3"/>
 		<param name="grid_map/show_esdf_time"                   value="false"/>

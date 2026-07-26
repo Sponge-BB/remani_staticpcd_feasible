@@ -29,10 +29,11 @@ search:
   goal_rate: 0.4             # Probability for RRT to sample the end point
   max_loop_num: 5000         # Maximum number of RRT sampling times
   max_sample_time: 0.2       # Maximum time for whole-body RRT
-  max_mani_search_time: 0.05 # Maximum time for manipulator search
+  max_mani_search_time: 0.12 # Maximum time for manipulator search
 
 optimization:
   weight_obstacle          : 50000.0  # Weight for obstacle
+  weight_manipulator_hold  : 2.0      # Prefer the current pose without blocking necessary clearance motion
   weight_manipulator_self       : 1000.0   # Weight for self collision
   weight_base_feasibility       : 100.0    # Weight for base feasibility
   weight_manipulator_feasibility: 100.0    # Weight for manipulator feasibility

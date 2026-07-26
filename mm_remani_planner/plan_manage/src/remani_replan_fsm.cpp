@@ -1,5 +1,7 @@
 #include <plan_manage/remani_replan_fsm.h>
 
+#include <limits>
+
 namespace remani_planner
 {
   REMANIReplanFSM::~REMANIReplanFSM(){}
@@ -27,6 +29,7 @@ namespace remani_planner
     nh.param("fsm/global_plan_dynamic_lookahead_time", global_plan_dynamic_lookahead_time_, 2.0);
     nh.param("fsm/global_plan_dynamic_check_interval", global_plan_dynamic_check_interval_, 0.1);
     nh.param("fsm/global_plan_dynamic_check_time_step", global_plan_dynamic_check_time_step_, 0.05);
+    nh.param("fsm/global_plan_static_check_time_step", global_plan_static_check_time_step_, 0.1);
     nh.param("fsm/global_plan_max_failures", global_plan_max_failures_, 3);
     nh.param("fsm/global_plan_trial_times", global_plan_trial_times_, 3);
     nh.param("fsm/time_for_gripper", time_for_gripper_, -1.0);
@@ -36,6 +39,7 @@ namespace remani_planner
     global_plan_dynamic_lookahead_time_ = std::max(0.0, global_plan_dynamic_lookahead_time_);
     global_plan_dynamic_check_interval_ = std::max(0.01, global_plan_dynamic_check_interval_);
     global_plan_dynamic_check_time_step_ = std::max(0.01, global_plan_dynamic_check_time_step_);
+    global_plan_static_check_time_step_ = std::max(0.01, global_plan_static_check_time_step_);
     last_global_plan_dynamic_check_time_ = ros::Time(0);
 
     nh.param("mm/mobile_base_dof", mobile_base_dim_, -1);
@@ -387,22 +391,44 @@ namespace remani_planner
         t_temp = t_cur;
       }
 
-      // A bounded future scan uses only real-time LiDAR occupancy, leaving
-      // the static PCD trajectory behavior unchanged.
+      // Scan the future trajectory against both the persistent PCD ESDF and
+      // the live LiDAR layer. The latter is kept separate because its direct
+      // occupancy query reacts before the ESDF update completes.
       const bool time_for_future_check = last_global_plan_dynamic_check_time_.isZero() ||
                                          (now - last_global_plan_dynamic_check_time_).toSec() >=
                                              global_plan_dynamic_check_interval_;
       if (!occ && global_plan_dynamic_lookahead_time_ > 0.0 && time_for_future_check){
         last_global_plan_dynamic_check_time_ = now;
         const double check_end = std::min(info->duration, t_cur + global_plan_dynamic_lookahead_time_);
-        for (double t_check = t_cur + global_plan_dynamic_check_time_step_; t_check <= check_end;
-             t_check += global_plan_dynamic_check_time_step_){
-          if (planner_manager_->ploy_traj_opt_->checkDynamicObstacleCollision(*info, t_check, coll_type)){
-            t_temp = t_check;
-            occ = true;
-            ROS_WARN_THROTTLE(1.0, "Future collision detected %.2f s ahead, triggering replan!", t_temp - t_cur);
+        double static_collision_time = std::numeric_limits<double>::infinity();
+        double dynamic_collision_time = std::numeric_limits<double>::infinity();
+        int static_coll_type = -1;
+        int dynamic_coll_type = -1;
+
+        for (double t_check = t_cur + global_plan_static_check_time_step_; t_check <= check_end;
+             t_check += global_plan_static_check_time_step_){
+          if (planner_manager_->ploy_traj_opt_->checkCollision(*info, t_check, static_coll_type)){
+            static_collision_time = t_check;
             break;
           }
+        }
+
+        for (double t_check = t_cur + global_plan_dynamic_check_time_step_; t_check <= check_end;
+             t_check += global_plan_dynamic_check_time_step_){
+          if (planner_manager_->ploy_traj_opt_->checkDynamicObstacleCollision(*info, t_check, dynamic_coll_type)){
+            dynamic_collision_time = t_check;
+            break;
+          }
+        }
+
+        if (static_collision_time < std::numeric_limits<double>::infinity() ||
+            dynamic_collision_time < std::numeric_limits<double>::infinity()){
+          const bool use_static_collision = static_collision_time <= dynamic_collision_time;
+          t_temp = use_static_collision ? static_collision_time : dynamic_collision_time;
+          coll_type = use_static_collision ? static_coll_type : dynamic_coll_type;
+          occ = true;
+          ROS_WARN_THROTTLE(1.0, "Future %s collision detected %.2f s ahead, triggering replan!",
+                            use_static_collision ? "map" : "dynamic", t_temp - t_cur);
         }
       }
     } else {

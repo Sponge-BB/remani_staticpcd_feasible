@@ -86,6 +86,7 @@ namespace remani_planner
     double global_plan_dynamic_lookahead_time_;
     double global_plan_dynamic_check_interval_;
     double global_plan_dynamic_check_time_step_;
+    double global_plan_static_check_time_step_;
     int replan_fail_time_;
     int new_traj_fail_time_;
     int global_plan_max_failures_;

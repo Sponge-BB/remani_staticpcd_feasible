@@ -29,10 +29,11 @@ remani_planner_node:
     thresh_no_replan_meter: 1.0
     # 紧急停车时间窗口 (秒)，碰撞距离<此值时触发急停
     emergency_time: 1
-    # 全局路径模式下，每 0.1 秒前视 2 秒轨迹以提前避开新出现的动态障碍物
+    # 全局路径模式下，每 0.1 秒前视 2 秒轨迹，以提前避开静态 PCD 与动态雷达障碍物
     global_plan_dynamic_lookahead_time: 2.0
     global_plan_dynamic_check_interval: 0.1
     global_plan_dynamic_check_time_step: 0.05
+    global_plan_static_check_time_step: 0.1
     # 手动 2D 导航全程保持当前机械臂姿态，避免在目标点追加原地收臂轨迹
     manual_target_end_arm_standby: false
     manual_restore_standby_after_goal: false
@@ -44,18 +45,22 @@ remani_planner_node:
     # 允许短暂倒车调整姿态，但拒绝整条轨迹全为倒车的候选。
     allow_reverse: true
     require_forward_segment: true
+    # 桥下等场景给机械臂采样更多预算，避免找到底盘路线后机械臂无解。
+    max_mani_search_time: 0.12
 
   optimization:
-    # 起终机械臂姿态相同时，软约束中间关节保持当前姿态；碰撞代价更高时仍可避让。
-    weight_manipulator_hold: 20.0
+    # 起终机械臂姿态相同时，轻度偏好当前姿态，但给桥下避障留下足够调整空间。
+    weight_manipulator_hold: 2.0
 
   # --- ESDF 地图障碍物膨胀 ---
   grid_map:
     # 障碍物膨胀半径 (米)，越大 = 障碍物周围禁飞区越大
     # 分辨率为 0.05m，建议 0.1~0.3 (即 2~6 个体素)
     obstacles_inflation: 0
-    # 预构建全局 PCD 的膨胀半径。设为和实时点云一致，保证雷达盲区后的 PCD 障碍进入碰撞检测。
+    # PCD 自身保持原始几何；机械臂碰撞检查统一使用 safe_margin_mani。
     global_map_obstacles_inflation: 0
+    # 静态 PCD 不能由雷达漏检清除；动态激光层仍会在新扫描到来时自动清空。
+    global_map_lidar_clear: false
     # ESDF 局部边界额外膨胀量 (米)，0=不额外扩展
     local_bound_inflate: 0.0
 
