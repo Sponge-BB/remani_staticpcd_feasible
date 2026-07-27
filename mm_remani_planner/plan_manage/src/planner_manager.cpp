@@ -301,7 +301,7 @@ namespace remani_planner
           vel = traj_container_.global_traj.traj.getVel(t - traj_container_.global_traj.global_start_time);
           yaw = atan2(vel(1), vel(0));
         }
-        occ = mm_config_->checkcollision(Eigen::Vector3d(pos_t(0), pos_t(1), yaw), pos_t.tail(pp_.manipulator_dim_), true);
+        occ = mm_config_->checkcollision(Eigen::Vector3d(pos_t(0), pos_t(1), yaw), pos_t.tail(pp_.manipulator_dim_), false);
         if(occ) continue;
         local_target_pos = pos_t;
         traj_container_.global_traj.glb_t_of_lc_tgt = t;

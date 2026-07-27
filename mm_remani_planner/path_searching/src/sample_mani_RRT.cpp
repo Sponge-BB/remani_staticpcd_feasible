@@ -685,7 +685,7 @@ namespace mani_sample{
     node->node_state = ManiPathNode::NODE_STATE::EXPAND;
     node->state = s;
     
-    if(mm_config_->checkManicollision(car_state_list_[node->index], node->state, true))
+    if(mm_config_->checkManicollision(car_state_list_[node->index], node->state, false))
     {
       node->node_state = ManiPathNode::NODE_STATE::COLLISION;
     }
@@ -904,7 +904,7 @@ namespace mani_sample{
       curr_node->parent = nullptr;
       curr_node->children.clear();
       curr_node->g_score = 1.0e6;
-      if(mm_config_->checkManicollision(car_state_list_[curr_node->index], curr_node->state, true)){
+      if(mm_config_->checkManicollision(car_state_list_[curr_node->index], curr_node->state, false)){
         // delete curr_node;
         // node_pool_.erase(temp_it);
         curr_node->node_state = ManiPathNode::NODE_STATE::COLLISION;
@@ -955,7 +955,7 @@ namespace mani_sample{
       temp_it = it;
       ++it;
       if(feasibleCheck(q, temp_it->second) || 
-          mm_config_->checkManicollision(car_state_list_[temp_it->second->index], temp_it->second->state, true) ||
+          mm_config_->checkManicollision(car_state_list_[temp_it->second->index], temp_it->second->state, false) ||
           checkcollision(q, temp_it->second)){
         clearSubTree(temp_it->second);
         q->children.erase(temp_it);
@@ -1189,7 +1189,7 @@ namespace mani_sample{
                  sin(xt[2]),  cos(xt[2]), 0, xt(1),
                  0,           0,          1, 0,
                  0,           0,          0, 1;
-      if(mm_config_->checkManicollision(xt, (cur_state->state + (next_state->state - cur_state->state) * double(i) / double(check_num_)), true)){
+      if(mm_config_->checkManicollision(xt, (cur_state->state + (next_state->state - cur_state->state) * double(i) / double(check_num_)), false)){
         return true;
       }
     }
