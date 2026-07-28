@@ -104,6 +104,7 @@ struct MappingParameters
   bool global_map_lidar_clear_;
   double global_map_lidar_clear_radius_;
   int global_map_lidar_clear_min_misses_;
+  double dynamic_static_match_radius_;
   bool self_filter_enable_;
   Eigen::Vector3d self_filter_min_, self_filter_max_;
 };

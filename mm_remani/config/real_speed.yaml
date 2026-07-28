@@ -25,6 +25,9 @@ remani_planner_node:
     thresh_replan_time: 2.5
     # 预期重规划耗时上限 (秒)，必须小于 thresh_replan_time
     replan_trajectory_time: 0.4
+    # 实车偏离旧轨迹超过该值时，以里程计残差修正下一条轨迹的交接起点。
+    replan_feedback_position_threshold: 0.08
+    replan_feedback_yaw_threshold: 0.15
     # 靠近目标时停止重规划的距离阈值 (米)
     thresh_no_replan_meter: 1.0
     # 紧急停车时间窗口 (秒)，碰撞距离<此值时触发急停
@@ -34,6 +37,9 @@ remani_planner_node:
     global_plan_dynamic_check_interval: 0.1
     global_plan_dynamic_check_time_step: 0.05
     global_plan_static_check_time_step: 0.1
+    # Dynamic points need three consecutive scans before they interrupt a bridge trajectory.
+    global_plan_dynamic_confirm_frames: 3
+    global_plan_safety_replan_cooldown: 0.75
     # 手动 2D 导航主轨迹保持当前机械臂姿态；避障结束后再原地恢复待机位。
     manual_target_end_arm_standby: false
     manual_restore_standby_after_goal: true
@@ -46,6 +52,8 @@ remani_planner_node:
     # 允许短暂倒车调整姿态，但拒绝整条轨迹全为倒车的候选。
     allow_reverse: true
     require_forward_segment: true
+    rear_goal_forward_only_distance: 0.50
+    rear_goal_forward_only_cos: -0.20
     # 桥下等场景给机械臂采样更多预算，避免找到底盘路线后机械臂无解。
     max_mani_search_time: 0.12
     # 将关节余量纳入段时间分配，保证桥下避障动作能在底盘到达前完成。
@@ -66,6 +74,8 @@ remani_planner_node:
     global_map_obstacles_inflation: 0
     # 静态 PCD 不能由雷达漏检清除；动态激光层仍会在新扫描到来时自动清空。
     global_map_lidar_clear: false
+    # 与静态 PCD 相邻的实时点视为桥体回波，不作为新的动态障碍物。
+    dynamic_static_match_radius: 0.075
     # ESDF 局部边界额外膨胀量 (米)，0=不额外扩展
     local_bound_inflate: 0.0
 
@@ -77,9 +87,21 @@ piper_ctrl_single_node:
 # --- 实车底盘轨迹追踪器的安全死区 ---
 real_base_tracker:
   # 铁律：Tracker 的速度极限必须比规划出的车速大约大 15%~20%
-  tracker_max_v: 0.6   # 底盘绝对最大直线追赶速度 (m/s)
-  tracker_max_w: 1.5   # 底盘绝对最大转向极速 (rad/s)
+  tracker_max_v: 0.30  # 比规划轮速上限约 0.23m/s 略高，避免误差追赶过快
+  tracker_max_w: 0.80  # 实车底盘最大转向速度 (rad/s)
+  tracker_max_linear_accel: 0.35  # 追踪器线速度变化率上限 (m/s^2)
+  tracker_max_angular_accel: 1.00 # 追踪器角速度变化率上限 (rad/s^2)
   # 规划异常或旧轨迹请求倒车时，作为底盘前的最后一道保护
   allow_reverse: false
   # 规划器或控制器停止发布后，超时自动发布零速度。
   command_timeout: 0.30
+  # 静止轨迹终点必须进入此范围才停车，避免在目标外 0.15m 提前结束。
+  goal_position_tolerance: 0.05
+  goal_yaw_tolerance: 0.10
+  goal_speed_tolerance: 0.05
+  # 默认不执行长距离倒车，只允许重规划交接时的小幅、低速回退校正。
+  local_reverse_recovery: true
+  local_reverse_max_distance: 0.15
+  local_reverse_max_lateral_error: 0.08
+  local_reverse_max_yaw_error: 0.35
+  local_reverse_max_speed: 0.08

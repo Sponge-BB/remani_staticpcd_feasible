@@ -50,9 +50,21 @@ class RealBaseTracker:
         # 最大限幅将从统配文件 (`real_speed.yaml`) 中的参数服务器拉取
         self.max_v = rospy.get_param('~tracker_max_v', 0.6)   # 最大线速度
         self.max_w = rospy.get_param('~tracker_max_w', 1.5)   # 最大角速度
+        self.max_linear_accel = max(0.01, rospy.get_param('~tracker_max_linear_accel', 0.35))
+        self.max_angular_accel = max(0.01, rospy.get_param('~tracker_max_angular_accel', 1.0))
         self.allow_reverse = rospy.get_param('~allow_reverse', False)
         self.command_timeout = max(0.05, rospy.get_param('~command_timeout', 0.3))
+        self.goal_position_tolerance = max(0.01, rospy.get_param('~goal_position_tolerance', 0.05))
+        self.goal_yaw_tolerance = max(0.01, rospy.get_param('~goal_yaw_tolerance', 0.1))
+        self.goal_speed_tolerance = max(0.0, rospy.get_param('~goal_speed_tolerance', 0.05))
+        self.local_reverse_recovery = rospy.get_param('~local_reverse_recovery', True)
+        self.local_reverse_max_distance = max(0.02, rospy.get_param('~local_reverse_max_distance', 0.15))
+        self.local_reverse_max_lateral_error = max(0.01, rospy.get_param('~local_reverse_max_lateral_error', 0.08))
+        self.local_reverse_max_yaw_error = max(0.01, rospy.get_param('~local_reverse_max_yaw_error', 0.35))
+        self.local_reverse_max_speed = max(0.01, rospy.get_param('~local_reverse_max_speed', 0.08))
         self.target_stamp = rospy.Time(0)
+        self.last_cmd = Twist()
+        self.last_control_stamp = rospy.Time(0)
         rospy.on_shutdown(self.publish_stop)
 
         # 控制循环频率 (50ms = 20Hz)
@@ -80,7 +92,9 @@ class RealBaseTracker:
         self.target_stamp = rospy.Time.now()
 
     def publish_stop(self):
-        self.cmd_pub.publish(Twist())
+        self.last_cmd = Twist()
+        self.last_control_stamp = rospy.Time.now()
+        self.cmd_pub.publish(self.last_cmd)
 
     def normalize_angle(self, angle):
         while angle > math.pi:
@@ -88,6 +102,11 @@ class RealBaseTracker:
         while angle < -math.pi:
             angle += 2.0 * math.pi
         return angle
+
+    @staticmethod
+    def limit_rate(target, previous, max_rate, dt):
+        delta = max_rate * max(0.0, dt)
+        return max(previous - delta, min(previous + delta, target))
 
     def control_loop(self, event):
         if not self.has_odom or not self.has_target:
@@ -98,6 +117,13 @@ class RealBaseTracker:
             rospy.logwarn_throttle(1.0, "Trajectory command timed out; stopping base")
             self.publish_stop()
             return
+
+        now = rospy.Time.now()
+        if self.last_control_stamp.is_zero():
+            dt = 0.05
+        else:
+            dt = min(0.2, max(0.0, (now - self.last_control_stamp).to_sec()))
+        self.last_control_stamp = now
 
         # Target local feedforward velocity
         v_r = self.target_vx * math.cos(self.target_yaw) + self.target_vy * math.sin(self.target_yaw)
@@ -114,7 +140,9 @@ class RealBaseTracker:
         dist = math.hypot(ex_global, ey_global)
 
         # 如果已经非常接近终点，直接刹车停稳
-        if dist < 0.15 and abs(eyaw) < 0.1 and abs(v_r) < 0.05:
+        if (dist < self.goal_position_tolerance and
+                abs(eyaw) < self.goal_yaw_tolerance and
+                abs(v_r) < self.goal_speed_tolerance):
             err_msg = Float64MultiArray()
             err_msg.data = [dist, ex, ey, eyaw]
             self.err_pub.publish(err_msg)
@@ -140,11 +168,30 @@ class RealBaseTracker:
         if cmd.angular.z > self.max_w: cmd.angular.z = self.max_w
         if cmd.angular.z < -self.max_w: cmd.angular.z = -self.max_w
 
-        # The real base is configured for forward-only motion.  This remains a
-        # final safety guard if an old trajectory or another publisher requests reverse.
+        # Keep normal motion forward-only. A small reverse command is allowed only
+        # to recover a nearby handoff error; planned long reverse segments stay blocked.
         if not self.allow_reverse and cmd.linear.x < 0.0:
-            rospy.logwarn_throttle(1.0, "Blocked reverse cmd_vel request")
-            cmd.linear.x = 0.0
+            local_reverse_ok = (
+                self.local_reverse_recovery and
+                v_r >= -self.goal_speed_tolerance and
+                -self.local_reverse_max_distance <= ex < 0.0 and
+                abs(ey) <= self.local_reverse_max_lateral_error and
+                abs(eyaw) <= self.local_reverse_max_yaw_error
+            )
+            if local_reverse_ok:
+                cmd.linear.x = max(cmd.linear.x, -self.local_reverse_max_speed)
+                rospy.loginfo_throttle(1.0, "Using local reverse recovery for trajectory handoff")
+            else:
+                rospy.logwarn_throttle(1.0, "Blocked non-local reverse cmd_vel request")
+                cmd.linear.x = 0.0
+
+        # Keep trajectory handoffs physically smooth. The polynomial trajectory
+        # already respects planning limits; this only bounds tracker corrections.
+        cmd.linear.x = self.limit_rate(cmd.linear.x, self.last_cmd.linear.x,
+                                       self.max_linear_accel, dt)
+        cmd.angular.z = self.limit_rate(cmd.angular.z, self.last_cmd.angular.z,
+                                        self.max_angular_accel, dt)
+        self.last_cmd = cmd
 
         # 下发给底盘驱动节点
         self.cmd_pub.publish(cmd)

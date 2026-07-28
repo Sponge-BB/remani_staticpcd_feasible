@@ -34,6 +34,8 @@ void KinoAstar::setParam(ros::NodeHandle& nh, const std::shared_ptr<GridMap> &en
   nh.param("search/traj_steer_change_penalty", traj_steer_change_penalty_, 0.0);
   nh.param("search/allow_reverse", allow_reverse_, true);
   nh.param("search/require_forward_segment", require_forward_segment_, true);
+  nh.param("search/rear_goal_forward_only_distance", rear_goal_forward_only_distance_, 0.5);
+  nh.param("search/rear_goal_forward_only_cos", rear_goal_forward_only_cos_, -0.2);
   nh.param("search/max_arc", max_arc_, 0.9);
   nh.param("search/oneshot_check_len", oneshot_check_len_, 0.2);
   
@@ -56,6 +58,8 @@ void KinoAstar::setParam(ros::NodeHandle& nh, const std::shared_ptr<GridMap> &en
   search_vis_stride_ = std::max(1, search_vis_stride_);
   search_vis_max_points_ = std::max(1, search_vis_max_points_);
   search_vis_publish_interval_ = std::max(1, search_vis_publish_interval_);
+  rear_goal_forward_only_distance_ = std::max(0.0, rear_goal_forward_only_distance_);
+  rear_goal_forward_only_cos_ = std::max(-1.0, std::min(1.0, rear_goal_forward_only_cos_));
   nh.param("fsm/planning_horizon", planning_horizon_, 10.0);
 
   bool global_plan;
@@ -156,6 +160,22 @@ int KinoAstar::KinoAstarSearchAndGetSimplePath(const Eigen::VectorXd &start_pos,
   end_state(2) = end_yaw;
   end_state(3) = 0.0;
   end_state.tail(manipulator_dof_) = end_pos.tail(manipulator_dof_);
+
+  // A far goal behind the current heading would first produce an all-reverse
+  // Reeds-Shepp solution, which is rejected later by require_forward_segment_.
+  // Search the executable forward-only model directly and avoid that full retry.
+  const Eigen::Vector2d goal_offset = end_state.head(2) - start_state.head(2);
+  const double goal_distance = goal_offset.norm();
+  const Eigen::Vector2d heading(cos(start_yaw), sin(start_yaw));
+  const bool rear_far_goal =
+      goal_distance >= rear_goal_forward_only_distance_ && goal_distance > 1e-6 &&
+      heading.dot(goal_offset / goal_distance) <= rear_goal_forward_only_cos_;
+  const bool configured_allow_reverse = allow_reverse_;
+  const bool force_forward_only = configured_allow_reverse && require_forward_segment_ && rear_far_goal;
+  if (force_forward_only) {
+    ROS_INFO("[kino astar] rear distant goal: searching forward-only directly.");
+    configureMotionModel(false);
+  }
 
   mm_config_->visMM(local_start_goal_pub_, "start", 0, 0.8, start_state.head(3), start_state.tail(manipulator_dof_), start_gripper);
   mm_config_->visMM(local_start_goal_pub_, "gaol", 1, 0.8, end_state.head(3), end_state.tail(manipulator_dof_), end_gripper);
@@ -303,9 +323,11 @@ int KinoAstar::KinoAstarSearchAndGetSimplePath(const Eigen::VectorXd &start_pos,
       configureMotionModel(reverse_was_enabled);
       return forward_only_status;
     }
+    if(force_forward_only) configureMotionModel(configured_allow_reverse);
     if(achieve_hori) return KinoAstar::REACH_HORIZON;
     else return KinoAstar::REACH_END;
   }else{
+    if(force_forward_only) configureMotionModel(configured_allow_reverse);
     return KinoAstar::NO_PATH;
   }
 }

@@ -54,6 +54,12 @@ private:
 	bool startup_standby_captured_;
 	bool init_gripper_close_;
 	int last_singul_;
+	// Low-speed path tangents are noisy during trajectory handoff. Keep yaw and
+	// curvature feedforward bounded until the base has meaningful forward speed.
+	double yaw_hold_speed_;
+	double curvature_ff_start_speed_;
+	double curvature_ff_full_speed_;
+	double max_feedforward_omega_;
 
 	// Handles
 	ros::NodeHandle nh_;

@@ -121,6 +121,8 @@ class KinoAstar{
     double traj_steer_change_penalty_;
     bool allow_reverse_;
     bool require_forward_segment_;
+    double rear_goal_forward_only_distance_;
+    double rear_goal_forward_only_cos_;
     
     double oneshot_check_len_;
     double grid_interval_;

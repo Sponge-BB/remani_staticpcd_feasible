@@ -6,6 +6,15 @@ namespace MMController{
 MMControllerFSM::MMControllerFSM(const ros::NodeHandle& nh) : nh_(nh){
 	nh_.param("mm/mobile_base_dof", mobile_base_dof_, -1);
 	nh_.param("mm/manipulator_dof", manipulator_dof_, -1);
+	nh_.param("controller/yaw_hold_speed", yaw_hold_speed_, 0.04);
+	nh_.param("controller/curvature_ff_start_speed", curvature_ff_start_speed_, 0.04);
+	nh_.param("controller/curvature_ff_full_speed", curvature_ff_full_speed_, 0.10);
+	nh_.param("controller/max_feedforward_omega", max_feedforward_omega_, 0.60);
+	yaw_hold_speed_ = std::max(0.0, yaw_hold_speed_);
+	curvature_ff_start_speed_ = std::max(0.0, curvature_ff_start_speed_);
+	curvature_ff_full_speed_ = std::max(curvature_ff_start_speed_ + 1e-3,
+	                                    curvature_ff_full_speed_);
+	max_feedforward_omega_ = std::max(0.0, max_feedforward_omega_);
 
 	std::vector<double> init_state;
     nh.getParam("fsm/init_state", init_state);
@@ -245,20 +254,28 @@ void MMControllerFSM::cal_traj_ctrl_input(double duration){
 	cmd_data.car_true_cmd.resize(5);
 	cmd_data.car_true_cmd(0) = pos(0);
 	cmd_data.car_true_cmd(1) = pos(1);
-	if (vel.head(mobile_base_dof_).squaredNorm() > 1e-6)
-		cmd_data.car_true_cmd(2) = atan2(last_singul_ * vel(1), last_singul_ * vel(0));
-	else
-		cmd_data.car_true_cmd(2) = state_data.car_yaw;
+	const double base_speed = vel.head(mobile_base_dof_).norm();
+	if (base_speed > yaw_hold_speed_)
+			cmd_data.car_true_cmd(2) = atan2(last_singul_ * vel(1), last_singul_ * vel(0));
+		else
+			cmd_data.car_true_cmd(2) = state_data.car_yaw;
 	cmd_data.car_true_cmd(3) = vel(0);
 	cmd_data.car_true_cmd(4) = vel(1);
 
 	// desired angular velocity: omega = (vx*ay - vy*ax) / (vx^2+vy^2)
 	{
 		double v2 = vel(0) * vel(0) + vel(1) * vel(1);
-		if (v2 > 1e-6)
-			cmd_data.car_omega_cmd = (vel(0) * acc(1) - vel(1) * acc(0)) / v2;
-		else
+		if (base_speed > curvature_ff_start_speed_ && v2 > 1e-6) {
+			const double raw_omega = (vel(0) * acc(1) - vel(1) * acc(0)) / v2;
+			const double speed_blend = std::min(
+				1.0, (base_speed - curvature_ff_start_speed_) /
+				(curvature_ff_full_speed_ - curvature_ff_start_speed_));
+			const double bounded_omega = std::max(
+				-max_feedforward_omega_, std::min(max_feedforward_omega_, raw_omega));
+			cmd_data.car_omega_cmd = speed_blend * bounded_omega;
+		} else {
 			cmd_data.car_omega_cmd = 0.0;
+		}
 	}
 
 	cmd_data.joint_pos_cmd = pos.tail(manipulator_dof_);

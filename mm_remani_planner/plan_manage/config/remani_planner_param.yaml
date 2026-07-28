@@ -20,10 +20,14 @@ search:
   sample_time       : 0.1    # Sampling time when given to the backend
   curvatureDisCoe   : 0.4    # Angle coefficient for time allocation
   allocate_num      : 100000 # Number of allocated nodes (maximum number of nodes visited)
-  visualize_search  : true   # Debug only: publish Hybrid A* expanded nodes to RViz
+  visualize_search  : true   # Debug markers add avoidable overhead during live planning
   search_vis_stride : 1      # Publish one marker point every N expanded nodes
   search_vis_max_points: 3000 # Cap RViz search markers to avoid heavy debug load
   search_vis_publish_interval: 50 # Refresh RViz after this many recorded nodes
+  # Rear distant goals directly use forward-only search, avoiding a discarded
+  # all-reverse Reeds-Shepp solution followed by a second full search.
+  rear_goal_forward_only_distance: 0.50
+  rear_goal_forward_only_cos: -0.20
 
   # manipulator sample
   goal_rate: 0.4             # Probability for RRT to sample the end point
@@ -33,6 +37,12 @@ search:
   manipulator_velocity_utilization: 0.60
   manipulator_acceleration_utilization: 0.60
   manipulator_time_safety_factor: 1.15
+
+controller:
+  yaw_hold_speed: 0.04
+  curvature_ff_start_speed: 0.04
+  curvature_ff_full_speed: 0.10
+  max_feedforward_omega: 0.60
 
 optimization:
   weight_obstacle          : 50000.0  # Weight for obstacle
@@ -64,6 +74,10 @@ fsm:
 
   thresh_replan_time: 2.5     # Threshold for replanning time
   replan_trajectory_time: 0.4 # the expected max time of replanning trajectory, greater than max replan time
+  replan_feedback_position_threshold: 0.08 # Feedback handoff threshold for the real base (m)
+  replan_feedback_yaw_threshold: 0.15      # Feedback handoff threshold for the real base (rad)
+  global_plan_dynamic_confirm_frames: 3
+  global_plan_safety_replan_cooldown: 0.75
   global_plan_trial_times: 5  # Attempts per global planning cycle before yielding callbacks
   global_plan_max_failures: 5 # Give up an unreachable manual goal after this many failed cycles
   planning_horizon: 5.0       # Planning horizon (恢复为5.0，依靠前端A*作长距离导航)
@@ -73,3 +87,4 @@ fsm:
 grid_map:
   use_load_map: false     # Whether to use simulation map
   use_global_map: true # Whether to use global map
+  dynamic_static_match_radius: 0.075

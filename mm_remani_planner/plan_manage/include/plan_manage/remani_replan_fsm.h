@@ -83,10 +83,14 @@ namespace remani_planner
     bool enable_fail_safe_;
     int last_end_id_;
     double replan_trajectory_time_;
+    double replan_feedback_position_threshold_;
+    double replan_feedback_yaw_threshold_;
     double global_plan_dynamic_lookahead_time_;
     double global_plan_dynamic_check_interval_;
     double global_plan_dynamic_check_time_step_;
     double global_plan_static_check_time_step_;
+    int global_plan_dynamic_confirm_frames_;
+    double global_plan_safety_replan_cooldown_;
     int replan_fail_time_;
     int new_traj_fail_time_;
     int global_plan_max_failures_;
@@ -139,6 +143,9 @@ namespace remani_planner
 
     ros::Time t_last_Astar_;
     ros::Time last_global_plan_dynamic_check_time_;
+    ros::Time last_dynamic_collision_time_;
+    ros::Time safety_replan_cooldown_until_;
+    int dynamic_collision_confirm_count_;
 
     int map_state_;
 
@@ -159,6 +166,7 @@ namespace remani_planner
     /* ROS functions */
     void execFSMCallback(const ros::TimerEvent &e);
     void checkCollisionCallback(const ros::TimerEvent &e);
+    bool validateStaticTrajectory(const SingulTrajData &traj, int &coll_type) const;
     bool planNextWaypoint(const Eigen::VectorXd next_wp, const double nect_yaw);
     void waypointCallback(const geometry_msgs::PoseStamped::ConstPtr &msg);
     void mmCarOdomCallback(const nav_msgs::OdometryConstPtr &msg);

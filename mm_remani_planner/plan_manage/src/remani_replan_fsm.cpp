@@ -26,10 +26,14 @@ namespace remani_planner
     nh.param("fsm/emergency_time", emergency_time_, 1.0);
     nh.param("fsm/fail_safe", enable_fail_safe_, true);
     nh.param("fsm/replan_trajectory_time", replan_trajectory_time_, 0.0);
+    nh.param("fsm/replan_feedback_position_threshold", replan_feedback_position_threshold_, 0.08);
+    nh.param("fsm/replan_feedback_yaw_threshold", replan_feedback_yaw_threshold_, 0.15);
     nh.param("fsm/global_plan_dynamic_lookahead_time", global_plan_dynamic_lookahead_time_, 2.0);
     nh.param("fsm/global_plan_dynamic_check_interval", global_plan_dynamic_check_interval_, 0.1);
     nh.param("fsm/global_plan_dynamic_check_time_step", global_plan_dynamic_check_time_step_, 0.05);
     nh.param("fsm/global_plan_static_check_time_step", global_plan_static_check_time_step_, 0.1);
+    nh.param("fsm/global_plan_dynamic_confirm_frames", global_plan_dynamic_confirm_frames_, 3);
+    nh.param("fsm/global_plan_safety_replan_cooldown", global_plan_safety_replan_cooldown_, 0.75);
     nh.param("fsm/global_plan_max_failures", global_plan_max_failures_, 3);
     nh.param("fsm/global_plan_trial_times", global_plan_trial_times_, 3);
     nh.param("fsm/time_for_gripper", time_for_gripper_, -1.0);
@@ -40,7 +44,14 @@ namespace remani_planner
     global_plan_dynamic_check_interval_ = std::max(0.01, global_plan_dynamic_check_interval_);
     global_plan_dynamic_check_time_step_ = std::max(0.01, global_plan_dynamic_check_time_step_);
     global_plan_static_check_time_step_ = std::max(0.01, global_plan_static_check_time_step_);
+    global_plan_dynamic_confirm_frames_ = std::max(1, global_plan_dynamic_confirm_frames_);
+    global_plan_safety_replan_cooldown_ = std::max(0.0, global_plan_safety_replan_cooldown_);
+    replan_feedback_position_threshold_ = std::max(0.0, replan_feedback_position_threshold_);
+    replan_feedback_yaw_threshold_ = std::max(0.0, replan_feedback_yaw_threshold_);
     last_global_plan_dynamic_check_time_ = ros::Time(0);
+    last_dynamic_collision_time_ = ros::Time(0);
+    safety_replan_cooldown_until_ = ros::Time(0);
+    dynamic_collision_confirm_count_ = 0;
 
     nh.param("mm/mobile_base_dof", mobile_base_dim_, -1);
     nh.param("mm/manipulator_dof", manipulator_dim_, -1);
@@ -423,14 +434,38 @@ namespace remani_planner
           }
         }
 
-        if (static_collision_time < std::numeric_limits<double>::infinity() ||
-            dynamic_collision_time < std::numeric_limits<double>::infinity()){
-          const bool use_static_collision = static_collision_time <= dynamic_collision_time;
+        const bool has_static_collision = static_collision_time < std::numeric_limits<double>::infinity();
+        const bool has_dynamic_collision = dynamic_collision_time < std::numeric_limits<double>::infinity();
+        bool confirmed_dynamic_collision = false;
+        if (has_dynamic_collision) {
+          const bool urgent_dynamic_collision =
+              (dynamic_collision_time - t_cur) < emergency_time_;
+          if (!last_dynamic_collision_time_.isZero() &&
+              (now - last_dynamic_collision_time_).toSec() <= 1.5 * global_plan_dynamic_check_interval_) {
+            ++dynamic_collision_confirm_count_;
+          } else {
+            dynamic_collision_confirm_count_ = 1;
+          }
+          last_dynamic_collision_time_ = now;
+          confirmed_dynamic_collision = urgent_dynamic_collision ||
+                                        dynamic_collision_confirm_count_ >= global_plan_dynamic_confirm_frames_;
+          if (!confirmed_dynamic_collision) {
+            ROS_INFO_THROTTLE(1.0, "[FSM] Dynamic collision awaiting confirmation (%d/%d).",
+                              dynamic_collision_confirm_count_, global_plan_dynamic_confirm_frames_);
+          }
+        } else {
+          dynamic_collision_confirm_count_ = 0;
+          last_dynamic_collision_time_ = ros::Time(0);
+        }
+
+        if (has_static_collision || confirmed_dynamic_collision){
+          const bool use_static_collision = has_static_collision &&
+                                            (!confirmed_dynamic_collision || static_collision_time <= dynamic_collision_time);
           t_temp = use_static_collision ? static_collision_time : dynamic_collision_time;
           coll_type = use_static_collision ? static_coll_type : dynamic_coll_type;
           occ = true;
-          ROS_WARN_THROTTLE(1.0, "Future %s collision detected %.2f s ahead, triggering replan!",
-                            use_static_collision ? "map" : "dynamic", t_temp - t_cur);
+          ROS_WARN_THROTTLE(1.0, "[FSM] Future %s collision type=%d detected %.2f s ahead.",
+                            use_static_collision ? "map" : "dynamic", coll_type, t_temp - t_cur);
         }
       }
     } else {
@@ -457,8 +492,17 @@ namespace remani_planner
 
     if (occ){
       /* Handle the collided case immediately */
+      const bool urgent_collision = (t_temp - t_cur) < emergency_time_;
+      if (!urgent_collision && now < safety_replan_cooldown_until_){
+        ROS_WARN_THROTTLE(1.0, "[FSM] Suppress duplicate safety replan for %.2f s.",
+                          (safety_replan_cooldown_until_ - now).toSec());
+        return;
+      }
       ROS_INFO("Try to replan a safe trajectory");
       if (planFromLocalTraj(false)){ // Make a chance
+        safety_replan_cooldown_until_ = now + ros::Duration(global_plan_safety_replan_cooldown_);
+        dynamic_collision_confirm_count_ = 0;
+        last_dynamic_collision_time_ = ros::Time(0);
         changeFSMExecState(EXEC_TRAJ, "SAFETY");
         return;
       }else{
@@ -758,8 +802,9 @@ namespace remani_planner
 
   bool REMANIReplanFSM::planFromLocalTraj(bool flag_use_poly_init){
     SingulTrajData *info = &planner_manager_->traj_container_.singul_traj_data;
-    double t_cur = ros::Time::now().toSec() - info->start_time + replan_trajectory_time_;
-    t_cur = min(info->duration, t_cur);
+    const double now = ros::Time::now().toSec();
+    const double t_now = std::max(0.0, std::min(info->duration, now - info->start_time));
+    const double t_cur = std::min(info->duration, t_now + replan_trajectory_time_);
 
     start_pos_     = info->getPos(t_cur);
     start_vel_    = info->getVel(t_cur);
@@ -768,6 +813,26 @@ namespace remani_planner
     start_singul_ = info->getSingul(t_cur);
     if(start_vel_.norm() >= mobile_base_non_singul_vel_) start_yaw_ = atan2(start_singul_ * start_vel_(1), start_singul_ * start_vel_(0));
     else start_yaw_ = mm_car_yaw_;
+
+    // The original handoff assumed that the physical base stayed exactly on the
+    // old trajectory. Preserve the measured base residual at the switch time so
+    // the next trajectory starts from the real robot's predicted location.
+    const Eigen::VectorXd expected_now = info->getPos(t_now);
+    const Eigen::Vector2d position_error = mm_state_pos_.head(2) - expected_now.head(2);
+    const Eigen::VectorXd expected_now_vel = info->getVel(t_now);
+    const int expected_now_singul = info->getSingul(t_now);
+    const double expected_now_yaw = expected_now_vel.head(2).norm() >= mobile_base_non_singul_vel_
+        ? atan2(expected_now_singul * expected_now_vel(1), expected_now_singul * expected_now_vel(0))
+        : mm_car_yaw_;
+    const double yaw_error = atan2(sin(mm_car_yaw_ - expected_now_yaw), cos(mm_car_yaw_ - expected_now_yaw));
+
+    if (position_error.norm() > replan_feedback_position_threshold_ ||
+        fabs(yaw_error) > replan_feedback_yaw_threshold_) {
+      start_pos_.head(2) += position_error;
+      start_yaw_ = atan2(sin(start_yaw_ + yaw_error), cos(start_yaw_ + yaw_error));
+      ROS_WARN("[FSM] Replan handoff feedback: pos_error=%.3f m, yaw_error=%.3f rad, predicted_start=(%.3f, %.3f)",
+               position_error.norm(), yaw_error, start_pos_(0), start_pos_(1));
+    }
 
     bool success = callReboundReplan(flag_use_poly_init, false);
     if (!success){
@@ -782,6 +847,16 @@ namespace remani_planner
       }
     }
 
+    return true;
+  }
+
+  bool REMANIReplanFSM::validateStaticTrajectory(const SingulTrajData &traj, int &coll_type) const
+  {
+    for (double t = 0.0; t <= traj.duration; t += global_plan_static_check_time_step_)
+    {
+      if (planner_manager_->ploy_traj_opt_->checkCollision(traj, t, coll_type))
+        return false;
+    }
     return true;
   }
 
@@ -804,24 +879,21 @@ namespace remani_planner
     Eigen::VectorXd desired_start_pt, desired_start_vel, desired_start_acc, desired_start_jerk;
     int desired_start_singul;
     double desired_start_yaw;
-    double desired_start_time, start_time_dura;
+    double desired_start_time;
     
     if(have_local_traj_)
     {
       desired_start_time = ros::Time::now().toSec() + replan_trajectory_time_;
-      start_time_dura = desired_start_time - planner_manager_->traj_container_.singul_traj_data.start_time;
-      start_time_dura = min(start_time_dura, planner_manager_->traj_container_.singul_traj_data.duration);
-      
-      desired_start_pt = planner_manager_->traj_container_.singul_traj_data.getPos(start_time_dura);
-      desired_start_vel = planner_manager_->traj_container_.singul_traj_data.getVel(start_time_dura);
+      desired_start_pt = start_pos_;
+      desired_start_vel = start_vel_;
       if(desired_start_vel.head(2).norm() < mobile_base_non_singul_vel_){
         desired_start_vel(0) = start_singul_ * mobile_base_non_singul_vel_ * cos(start_yaw_);
         desired_start_vel(1) = start_singul_ * mobile_base_non_singul_vel_ * sin(start_yaw_);
       }
-      desired_start_singul = planner_manager_->traj_container_.singul_traj_data.getSingul(start_time_dura);
-      desired_start_acc = planner_manager_->traj_container_.singul_traj_data.getAcc(start_time_dura);
-      desired_start_jerk = planner_manager_->traj_container_.singul_traj_data.getJer(start_time_dura);
-      desired_start_yaw = atan2(desired_start_singul * desired_start_vel(1), desired_start_singul * desired_start_vel(0));
+      desired_start_singul = start_singul_;
+      desired_start_acc = start_acc_;
+      desired_start_jerk = start_jer_;
+      desired_start_yaw = start_yaw_;
     }else{
       desired_start_time = ros::Time::now().toSec();
       desired_start_pt = start_pos_;
@@ -846,6 +918,12 @@ namespace remani_planner
     have_new_target_ = false;
 
     if (plan_success){
+      int coll_type = -1;
+      const SingulTrajData &candidate = planner_manager_->traj_container_.singul_traj_data;
+      if (global_plan_ && !validateStaticTrajectory(candidate, coll_type)){
+        ROS_WARN("[FSM] Rejecting replan candidate: static collision type=%d remains after optimization.", coll_type);
+        return false;
+      }
       init_time_list_.push_back(init_time);
       opt_time_list_.push_back(opt_time);
       total_time_list_.push_back(init_time + opt_time);

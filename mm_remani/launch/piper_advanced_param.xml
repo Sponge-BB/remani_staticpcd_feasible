@@ -43,6 +43,10 @@
                 <param name="fsm/thresh_no_replan_meter"  value="1.0" type="double"/>
 	                <param name="fsm/thresh_replan_time"      value="2.5" type="double"/>
 	                <param name="fsm/replan_trajectory_time"  value="0.4" type="double"/>
+	                <param name="fsm/replan_feedback_position_threshold" value="0.08" type="double"/>
+	                <param name="fsm/replan_feedback_yaw_threshold" value="0.15" type="double"/>
+	                <param name="fsm/global_plan_dynamic_confirm_frames" value="3" type="int"/>
+	                <param name="fsm/global_plan_safety_replan_cooldown" value="0.75" type="double"/>
 	                <param name="fsm/emergency_time"          value="0.8" type="double"/>
                 <param name="fsm/fail_safe"               value="true"/>
                 <param name="fsm/global_plan"             value="true" />
@@ -102,6 +106,7 @@
 		<param name="grid_map/global_map_obstacles_inflation"   value="0.0"/>
 		<!-- The prebuilt PCD is a persistent collision layer. Live LiDAR is cleared separately. -->
 		<param name="grid_map/global_map_lidar_clear"           value="false"/>
+		<param name="grid_map/dynamic_static_match_radius"      value="0.075"/>
 		<param name="grid_map/global_map_lidar_clear_radius"    value="0.0"/>
 		<param name="grid_map/global_map_lidar_clear_min_misses" value="3"/>
 		<param name="grid_map/show_esdf_time"                   value="false"/>

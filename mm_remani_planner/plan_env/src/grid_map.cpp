@@ -69,8 +69,10 @@ void GridMap::initMap(ros::NodeHandle &nh)
   node_.param("grid_map/global_map_lidar_clear", mp_.global_map_lidar_clear_, true);
   node_.param("grid_map/global_map_lidar_clear_radius", mp_.global_map_lidar_clear_radius_, 0.0);
   node_.param("grid_map/global_map_lidar_clear_min_misses", mp_.global_map_lidar_clear_min_misses_, 3);
+  node_.param("grid_map/dynamic_static_match_radius", mp_.dynamic_static_match_radius_, 0.075);
   if (mp_.global_map_lidar_clear_min_misses_ < 1)
     mp_.global_map_lidar_clear_min_misses_ = 1;
+  mp_.dynamic_static_match_radius_ = std::max(0.0, mp_.dynamic_static_match_radius_);
   node_.param("grid_map/self_filter_enable", mp_.self_filter_enable_, false);
   node_.param("grid_map/self_filter_min_x", mp_.self_filter_min_(0), -0.8);
   node_.param("grid_map/self_filter_max_x", mp_.self_filter_max_(0), 0.45);
@@ -1809,8 +1811,30 @@ double GridMap::getDynamicObstacleDistance(const Eigen::Vector3d& pos, double ma
   Eigen::Vector3i center_id;
   posToIndex(pos, center_id);
   const int search_step = std::max(0, static_cast<int>(std::ceil(max_search_distance * mp_.resolution_inv_))) + 1;
+  const int static_match_step = std::max(
+      0, static_cast<int>(std::ceil(mp_.dynamic_static_match_radius_ * mp_.resolution_inv_)));
+  const double static_match_radius_sq =
+      mp_.dynamic_static_match_radius_ * mp_.dynamic_static_match_radius_;
   const double voxel_half_diagonal = 0.5 * std::sqrt(3.0) * mp_.resolution_;
   double min_dist = max_search_distance;
+
+  const auto matches_static_map = [&](const Eigen::Vector3i& dynamic_id) {
+    if (static_match_step == 0)
+      return md_.static_occupancy_[toAddress(dynamic_id)] != 0;
+
+    for (int sx = -static_match_step; sx <= static_match_step; ++sx)
+      for (int sy = -static_match_step; sy <= static_match_step; ++sy)
+        for (int sz = -static_match_step; sz <= static_match_step; ++sz)
+        {
+          const Eigen::Vector3i static_id = dynamic_id + Eigen::Vector3i(sx, sy, sz);
+          if (!isInMap(static_id) || !md_.static_occupancy_[toAddress(static_id)])
+            continue;
+          if ((static_id - dynamic_id).cast<double>().squaredNorm() * mp_.resolution_ * mp_.resolution_ <=
+              static_match_radius_sq)
+            return true;
+        }
+    return false;
+  };
 
   for (int dx = -search_step; dx <= search_step; ++dx)
     for (int dy = -search_step; dy <= search_step; ++dy)
@@ -1821,7 +1845,7 @@ double GridMap::getDynamicObstacleDistance(const Eigen::Vector3d& pos, double ma
           continue;
 
         const int idx = toAddress(id);
-        if (md_.static_occupancy_[idx] || md_.occupancy_buffer_[idx] <= mp_.min_occupancy_log_)
+        if (md_.occupancy_buffer_[idx] <= mp_.min_occupancy_log_ || matches_static_map(id))
           continue;
 
         Eigen::Vector3d voxel_center;
