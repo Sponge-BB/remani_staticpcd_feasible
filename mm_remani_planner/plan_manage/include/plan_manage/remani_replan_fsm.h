@@ -4,6 +4,7 @@
 #include <fstream>
 #include <Eigen/Eigen>
 #include <algorithm>
+#include <cstdint>
 #include <iostream>
 #include <nav_msgs/Path.h>
 #include <sensor_msgs/Imu.h>
@@ -94,6 +95,11 @@ namespace remani_planner
     double global_plan_dynamic_far_sample_distance_;
     double global_plan_dynamic_immediate_confirm_distance_;
     int global_plan_dynamic_confirm_frames_;
+    double global_plan_dynamic_confirm_timeout_;
+    double global_plan_dynamic_clear_hold_time_;
+    double global_plan_dynamic_replan_hold_time_;
+    double global_plan_dynamic_same_obstacle_radius_;
+    double global_plan_dynamic_retry_interval_;
     double global_plan_dynamic_slowdown_distance_;
     double global_plan_dynamic_slowdown_min_speed_;
     double global_plan_dynamic_slowdown_max_speed_;
@@ -156,8 +162,19 @@ namespace remani_planner
     ros::Time t_last_Astar_;
     ros::Time last_global_plan_dynamic_check_time_;
     ros::Time last_dynamic_collision_time_;
+    ros::Time last_dynamic_seen_time_;
+    ros::Time dynamic_replan_hold_until_;
+    ros::Time next_dynamic_replan_retry_time_;
+    std::uint64_t last_dynamic_observation_seq_;
     int dynamic_collision_confirm_count_;
     double current_safety_speed_limit_;
+    Eigen::Vector2d last_dynamic_confirmation_pos_;
+    Eigen::Vector2d last_dynamic_replan_collision_pos_;
+    int last_dynamic_replan_collision_type_;
+    bool has_last_dynamic_confirmation_pos_;
+    bool has_last_dynamic_replan_collision_;
+    bool dynamic_safety_speed_limit_active_;
+    bool dynamic_replan_retry_pending_;
 
     int map_state_;
 
@@ -179,6 +196,8 @@ namespace remani_planner
     void execFSMCallback(const ros::TimerEvent &e);
     void checkCollisionCallback(const ros::TimerEvent &e);
     void publishSafetySpeedLimit(double speed_limit);
+    void applyDynamicSafetySpeedLimit(double speed_limit);
+    void clearDynamicSafetySpeedLimit(const ros::Time &now, bool force = false);
     bool validateStaticTrajectory(const SingulTrajData &traj, int &coll_type) const;
     bool planNextWaypoint(const Eigen::VectorXd next_wp, const double nect_yaw);
     void waypointCallback(const geometry_msgs::PoseStamped::ConstPtr &msg);

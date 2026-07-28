@@ -40,9 +40,15 @@ remani_planner_node:
     global_plan_dynamic_check_interval: 0.1
     global_plan_dynamic_check_time_step: 0.05
     global_plan_static_check_time_step: 0.1
-    # 0.8m 内单帧确认，较远处连续两帧确认。
-    global_plan_dynamic_immediate_confirm_distance: 0.8
+    # 1.0m 内单帧确认；较远处使用不同地图帧确认，避免回调阻塞导致永远确认不到。
+    global_plan_dynamic_immediate_confirm_distance: 1.0
     global_plan_dynamic_confirm_frames: 2
+    global_plan_dynamic_confirm_timeout: 0.60
+    # 短暂漏检时保持限速；新轨迹发布后只抑制同一位置的重复事件。
+    global_plan_dynamic_clear_hold_time: 0.40
+    global_plan_dynamic_replan_hold_time: 0.60
+    global_plan_dynamic_same_obstacle_radius: 0.45
+    global_plan_dynamic_retry_interval: 0.30
     # 障碍物进入空间前视后先连续限速，只有进入动态制动距离才急停。
     global_plan_dynamic_slowdown_distance: 2.0
     global_plan_dynamic_slowdown_min_speed: 0.08
@@ -61,6 +67,8 @@ remani_planner_node:
   search:
     # Kino-A* 最大搜索时间 (秒)，适配 0.4s 重规划预算
     max_seach_time: 0.9
+    # 实车默认关闭 A* 扩展节点调试发布，保留最终搜索路径和优化轨迹。
+    visualize_search: false
     # 允许短暂倒车调整姿态，但拒绝整条轨迹全为倒车的候选。
     allow_reverse: true
     require_forward_segment: true
@@ -88,6 +96,9 @@ remani_planner_node:
     global_map_lidar_clear: false
     # 与静态 PCD 相邻的实时点视为桥体回波，不作为新的动态障碍物。
     dynamic_static_match_radius: 0.075
+    # 调试 ESDF 降频、降采样，避免可视化回调阻塞点云与安全检测。
+    visualization_interval: 0.20
+    esdf_visualization_stride: 2
     # ESDF 局部边界额外膨胀量 (米)，0=不额外扩展
     local_bound_inflate: 0.0
 

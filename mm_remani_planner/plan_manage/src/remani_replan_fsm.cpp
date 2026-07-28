@@ -37,6 +37,11 @@ namespace remani_planner
     nh.param("fsm/global_plan_dynamic_far_sample_distance", global_plan_dynamic_far_sample_distance_, 0.1);
     nh.param("fsm/global_plan_dynamic_immediate_confirm_distance", global_plan_dynamic_immediate_confirm_distance_, 0.8);
     nh.param("fsm/global_plan_dynamic_confirm_frames", global_plan_dynamic_confirm_frames_, 2);
+    nh.param("fsm/global_plan_dynamic_confirm_timeout", global_plan_dynamic_confirm_timeout_, 0.6);
+    nh.param("fsm/global_plan_dynamic_clear_hold_time", global_plan_dynamic_clear_hold_time_, 0.4);
+    nh.param("fsm/global_plan_dynamic_replan_hold_time", global_plan_dynamic_replan_hold_time_, 0.6);
+    nh.param("fsm/global_plan_dynamic_same_obstacle_radius", global_plan_dynamic_same_obstacle_radius_, 0.45);
+    nh.param("fsm/global_plan_dynamic_retry_interval", global_plan_dynamic_retry_interval_, 0.3);
     nh.param("fsm/global_plan_dynamic_slowdown_distance", global_plan_dynamic_slowdown_distance_, 2.0);
     nh.param("fsm/global_plan_dynamic_slowdown_min_speed", global_plan_dynamic_slowdown_min_speed_, 0.08);
     nh.param("fsm/global_plan_dynamic_slowdown_max_speed", global_plan_dynamic_slowdown_max_speed_, 0.20);
@@ -59,6 +64,12 @@ namespace remani_planner
     global_plan_dynamic_far_sample_distance_ = std::max(0.02, global_plan_dynamic_far_sample_distance_);
     global_plan_dynamic_immediate_confirm_distance_ = std::max(0.0, global_plan_dynamic_immediate_confirm_distance_);
     global_plan_dynamic_confirm_frames_ = std::max(1, global_plan_dynamic_confirm_frames_);
+    global_plan_dynamic_confirm_timeout_ = std::max(
+        global_plan_dynamic_check_interval_, global_plan_dynamic_confirm_timeout_);
+    global_plan_dynamic_clear_hold_time_ = std::max(0.0, global_plan_dynamic_clear_hold_time_);
+    global_plan_dynamic_replan_hold_time_ = std::max(0.0, global_plan_dynamic_replan_hold_time_);
+    global_plan_dynamic_same_obstacle_radius_ = std::max(0.0, global_plan_dynamic_same_obstacle_radius_);
+    global_plan_dynamic_retry_interval_ = std::max(0.05, global_plan_dynamic_retry_interval_);
     global_plan_dynamic_slowdown_distance_ = std::max(0.0, global_plan_dynamic_slowdown_distance_);
     global_plan_dynamic_slowdown_min_speed_ = std::max(0.0, global_plan_dynamic_slowdown_min_speed_);
     global_plan_dynamic_slowdown_max_speed_ = std::max(global_plan_dynamic_slowdown_min_speed_,
@@ -73,8 +84,19 @@ namespace remani_planner
     replan_feedback_yaw_threshold_ = std::max(0.0, replan_feedback_yaw_threshold_);
     last_global_plan_dynamic_check_time_ = ros::Time(0);
     last_dynamic_collision_time_ = ros::Time(0);
+    last_dynamic_seen_time_ = ros::Time(0);
+    dynamic_replan_hold_until_ = ros::Time(0);
+    next_dynamic_replan_retry_time_ = ros::Time(0);
+    last_dynamic_observation_seq_ = 0;
     dynamic_collision_confirm_count_ = 0;
     current_safety_speed_limit_ = std::numeric_limits<double>::quiet_NaN();
+    last_dynamic_confirmation_pos_.setZero();
+    last_dynamic_replan_collision_pos_.setZero();
+    last_dynamic_replan_collision_type_ = -1;
+    has_last_dynamic_confirmation_pos_ = false;
+    has_last_dynamic_replan_collision_ = false;
+    dynamic_safety_speed_limit_active_ = false;
+    dynamic_replan_retry_pending_ = false;
 
     nh.param("mm/mobile_base_dof", mobile_base_dim_, -1);
     nh.param("mm/manipulator_dof", manipulator_dim_, -1);
@@ -253,10 +275,19 @@ namespace remani_planner
 
     case REPLAN_TRAJ:
     {
+      if (dynamic_replan_retry_pending_ &&
+          ros::Time::now() < next_dynamic_replan_retry_time_) {
+        goto force_return;
+      }
 
       if(planFromLocalTraj(flag_relan_astar_)){
         replan_fail_time_ = 0;
         flag_relan_astar_ = false;
+        if (dynamic_replan_retry_pending_) {
+          dynamic_replan_retry_pending_ = false;
+          dynamic_replan_hold_until_ =
+              ros::Time::now() + ros::Duration(global_plan_dynamic_replan_hold_time_);
+        }
         if((ros::Time::now() - t_last_Astar_ ).toSec() > 1.0){
           std::cout << "cal front end next time" << std::endl;
           flag_relan_astar_ = true;
@@ -268,8 +299,13 @@ namespace remani_planner
         replan_fail_time_++;
         flag_relan_astar_ = true;
         t_last_Astar_ = ros::Time::now();
+        if (dynamic_replan_retry_pending_) {
+          next_dynamic_replan_retry_time_ =
+              ros::Time::now() + ros::Duration(global_plan_dynamic_retry_interval_);
+        }
         if(replan_fail_time_ >= 20){
           replan_fail_time_ = 0;
+          dynamic_replan_retry_pending_ = false;
           ROS_ERROR("[FSM]:REPLAN fail over 20 times!!!");
           changeFSMExecState(WAIT_TARGET, "FSM");
         }
@@ -405,17 +441,54 @@ namespace remani_planner
     current_safety_speed_limit_ = normalized_limit;
   }
 
+  void REMANIReplanFSM::applyDynamicSafetySpeedLimit(double speed_limit)
+  {
+    double limited_speed = std::max(0.0, speed_limit);
+    if (dynamic_safety_speed_limit_active_ &&
+        std::isfinite(current_safety_speed_limit_) &&
+        current_safety_speed_limit_ >= 0.0) {
+      limited_speed = std::min(limited_speed, current_safety_speed_limit_);
+    }
+
+    dynamic_safety_speed_limit_active_ = true;
+    publishSafetySpeedLimit(limited_speed);
+  }
+
+  void REMANIReplanFSM::clearDynamicSafetySpeedLimit(const ros::Time &now, bool force)
+  {
+    if (!dynamic_safety_speed_limit_active_)
+      return;
+    if (!force &&
+        (exec_state_ == EMERGENCY_STOP || last_dynamic_seen_time_.isZero() ||
+         (now - last_dynamic_seen_time_).toSec() < global_plan_dynamic_clear_hold_time_)) {
+      return;
+    }
+
+    dynamic_safety_speed_limit_active_ = false;
+    if (force)
+      dynamic_replan_retry_pending_ = false;
+    dynamic_collision_confirm_count_ = 0;
+    last_dynamic_collision_time_ = ros::Time(0);
+    last_dynamic_seen_time_ = ros::Time(0);
+    has_last_dynamic_confirmation_pos_ = false;
+    has_last_dynamic_replan_collision_ = false;
+    publishSafetySpeedLimit(-1.0);
+  }
+
   void REMANIReplanFSM::checkCollisionCallback(const ros::TimerEvent &e){
     SingulTrajData *info = &planner_manager_->traj_container_.singul_traj_data;
     auto map = planner_manager_->grid_map_;
+    const ros::Time now = ros::Time::now();
 
     if (exec_state_ == WAIT_TARGET || info->traj_id <= 0){
+      clearDynamicSafetySpeedLimit(now, true);
       publishSafetySpeedLimit(-1.0);
       return;
     }
     /* ---------- check lost of depth ---------- */
     if (map->getOdomDepthTimeout()){
       ROS_ERROR("Depth Lost! EMERGENCY_STOP");
+      dynamic_safety_speed_limit_active_ = false;
       publishSafetySpeedLimit(0.0);
       enable_fail_safe_ = false;
       changeFSMExecState(EMERGENCY_STOP, "SAFETY");
@@ -423,13 +496,13 @@ namespace remani_planner
     }
     /* ---------- check trajectory ---------- */
     constexpr double time_step = 0.01;
-    const ros::Time now = ros::Time::now();
     double t_cur = now.toSec() - info->start_time;
     Eigen::VectorXd p_cur = info->getPos(t_cur);
     double t_temp = 0;
     bool occ = false;
     bool collision_is_dynamic = false;
     double dynamic_collision_path_distance = std::numeric_limits<double>::infinity();
+    Eigen::Vector2d dynamic_collision_position = Eigen::Vector2d::Zero();
     const double base_speed = mm_state_vel_.head(2).norm();
     const double calculated_stop_distance =
         base_speed * base_speed / (2.0 * global_plan_dynamic_emergency_deceleration_) +
@@ -464,6 +537,9 @@ namespace remani_planner
                                              global_plan_dynamic_check_interval_;
       if (!occ && global_plan_dynamic_lookahead_time_ > 0.0 && time_for_future_check){
         last_global_plan_dynamic_check_time_ = now;
+        const std::uint64_t dynamic_observation_seq = map->getDynamicObservationSeq();
+        const bool has_new_dynamic_observation =
+            dynamic_observation_seq != last_dynamic_observation_seq_;
         const double time_check_end = std::min(info->duration, t_cur + global_plan_dynamic_lookahead_time_);
         double static_collision_time = std::numeric_limits<double>::infinity();
         double dynamic_collision_time = std::numeric_limits<double>::infinity();
@@ -495,6 +571,7 @@ namespace remani_planner
             if (planner_manager_->ploy_traj_opt_->checkDynamicObstacleCollision(*info, t_check, dynamic_coll_type)){
               dynamic_collision_time = t_check;
               dynamic_collision_path_distance = scanned_path_distance;
+              dynamic_collision_position = dynamic_position;
               break;
             }
           }
@@ -510,14 +587,30 @@ namespace remani_planner
           const int required_confirm_frames =
               dynamic_collision_path_distance <= global_plan_dynamic_immediate_confirm_distance_ ?
                   1 : global_plan_dynamic_confirm_frames_;
-          if (!last_dynamic_collision_time_.isZero() &&
-              (now - last_dynamic_collision_time_).toSec() <= 1.5 * global_plan_dynamic_check_interval_) {
-            ++dynamic_collision_confirm_count_;
-          } else {
-            dynamic_collision_confirm_count_ = 1;
+
+          if (has_new_dynamic_observation) {
+            const bool confirmation_is_fresh =
+                !last_dynamic_collision_time_.isZero() &&
+                (now - last_dynamic_collision_time_).toSec() <= global_plan_dynamic_confirm_timeout_;
+            const bool confirmation_is_same_obstacle =
+                !has_last_dynamic_confirmation_pos_ ||
+                (dynamic_collision_position - last_dynamic_confirmation_pos_).norm() <=
+                    global_plan_dynamic_same_obstacle_radius_;
+
+            if (confirmation_is_fresh && confirmation_is_same_obstacle)
+              ++dynamic_collision_confirm_count_;
+            else
+              dynamic_collision_confirm_count_ = 1;
+
+            last_dynamic_collision_time_ = now;
+            last_dynamic_seen_time_ = now;
+            last_dynamic_confirmation_pos_ = dynamic_collision_position;
+            has_last_dynamic_confirmation_pos_ = true;
+            last_dynamic_observation_seq_ = dynamic_observation_seq;
           }
-          last_dynamic_collision_time_ = now;
+
           confirmed_dynamic_collision = dynamic_collision_path_distance <= dynamic_emergency_distance ||
+                                        required_confirm_frames == 1 ||
                                         dynamic_collision_confirm_count_ >= required_confirm_frames;
 
           if (dynamic_collision_path_distance <= global_plan_dynamic_slowdown_distance_){
@@ -529,20 +622,32 @@ namespace remani_planner
             const double speed_limit = global_plan_dynamic_slowdown_min_speed_ +
                 slowdown_ratio * (global_plan_dynamic_slowdown_max_speed_ -
                                   global_plan_dynamic_slowdown_min_speed_);
-            publishSafetySpeedLimit(dynamic_collision_path_distance <= dynamic_emergency_distance ?
-                                        0.0 : speed_limit);
-          } else {
-            publishSafetySpeedLimit(-1.0);
+            applyDynamicSafetySpeedLimit(
+                dynamic_collision_path_distance <= dynamic_emergency_distance ? 0.0 : speed_limit);
           }
 
           if (!confirmed_dynamic_collision) {
-            ROS_INFO_THROTTLE(1.0, "[FSM] Dynamic collision awaiting confirmation (%d/%d).",
-                              dynamic_collision_confirm_count_, required_confirm_frames);
+            ROS_INFO_THROTTLE(
+                1.0,
+                "[FSM] Dynamic collision awaiting distinct map frames (%d/%d, map_seq=%lu).",
+                dynamic_collision_confirm_count_, required_confirm_frames,
+                static_cast<unsigned long>(dynamic_observation_seq));
           }
         } else {
-          dynamic_collision_confirm_count_ = 0;
-          last_dynamic_collision_time_ = ros::Time(0);
-          publishSafetySpeedLimit(-1.0);
+          if (has_new_dynamic_observation) {
+            last_dynamic_observation_seq_ = dynamic_observation_seq;
+            if (!last_dynamic_collision_time_.isZero() &&
+                (now - last_dynamic_collision_time_).toSec() > global_plan_dynamic_confirm_timeout_) {
+              dynamic_collision_confirm_count_ = 0;
+              last_dynamic_collision_time_ = ros::Time(0);
+              has_last_dynamic_confirmation_pos_ = false;
+            }
+          }
+          clearDynamicSafetySpeedLimit(now);
+          if (dynamic_replan_retry_pending_ && !dynamic_safety_speed_limit_active_) {
+            dynamic_replan_retry_pending_ = false;
+            changeFSMExecState(EXEC_TRAJ, "SAFETY_CLEAR");
+          }
         }
 
         if (has_static_collision || confirmed_dynamic_collision){
@@ -595,10 +700,30 @@ namespace remani_planner
         return;
       }
 
+      if (collision_is_dynamic && has_last_dynamic_replan_collision_ &&
+          last_dynamic_replan_collision_type_ == coll_type &&
+          (dynamic_collision_position - last_dynamic_replan_collision_pos_).norm() <=
+              global_plan_dynamic_same_obstacle_radius_ &&
+          now < dynamic_replan_hold_until_) {
+        ROS_INFO_THROTTLE(
+            1.0,
+            "[FSM] Keep executing the new trajectory while the same dynamic event settles (%.2f s).",
+            (dynamic_replan_hold_until_ - now).toSec());
+        return;
+      }
+
       ROS_INFO("Try to replan a safe trajectory");
       if (planFromLocalTraj(false, !collision_is_dynamic)){ // Make a chance
         dynamic_collision_confirm_count_ = 0;
         last_dynamic_collision_time_ = ros::Time(0);
+        if (collision_is_dynamic) {
+          last_dynamic_replan_collision_pos_ = dynamic_collision_position;
+          last_dynamic_replan_collision_type_ = coll_type;
+          has_last_dynamic_replan_collision_ = true;
+          dynamic_replan_hold_until_ =
+              ros::Time::now() + ros::Duration(global_plan_dynamic_replan_hold_time_);
+          dynamic_replan_retry_pending_ = false;
+        }
         changeFSMExecState(EXEC_TRAJ, "SAFETY");
         return;
       }else{
@@ -606,7 +731,15 @@ namespace remani_planner
           ROS_WARN_THROTTLE(2.0, "Emergency stop! time=%f", t_temp - t_cur);
           changeFSMExecState(EMERGENCY_STOP, "SAFETY");
         }else if (collision_is_dynamic){
-          ROS_WARN("[FSM] Fast dynamic replan failed; keep the safety speed limit and retry from FSM.");
+          last_dynamic_replan_collision_pos_ = dynamic_collision_position;
+          last_dynamic_replan_collision_type_ = coll_type;
+          has_last_dynamic_replan_collision_ = true;
+          dynamic_replan_retry_pending_ = true;
+          next_dynamic_replan_retry_time_ =
+              ros::Time::now() + ros::Duration(global_plan_dynamic_retry_interval_);
+          dynamic_replan_hold_until_ = next_dynamic_replan_retry_time_;
+          ROS_WARN("[FSM] Fast dynamic replan failed; keep the speed limit and retry after %.2f s.",
+                   global_plan_dynamic_retry_interval_);
           changeFSMExecState(REPLAN_TRAJ, "SAFETY");
         }else{
           ROS_WARN("current traj in collision, replan.");
@@ -681,6 +814,14 @@ namespace remani_planner
 
   // manual waypoint
   void REMANIReplanFSM::waypointCallback(const geometry_msgs::PoseStamped::ConstPtr &msg){
+    clearDynamicSafetySpeedLimit(ros::Time::now(), true);
+    last_dynamic_observation_seq_ = 0;
+    dynamic_replan_retry_pending_ = false;
+    dynamic_collision_confirm_count_ = 0;
+    last_dynamic_collision_time_ = ros::Time(0);
+    last_dynamic_seen_time_ = ros::Time(0);
+    has_last_dynamic_confirmation_pos_ = false;
+    has_last_dynamic_replan_collision_ = false;
     
     if (target_type_ == TARGET_TYPE::PRESET_TARGET){
       have_trigger_ = true;

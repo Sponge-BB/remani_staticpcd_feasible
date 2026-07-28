@@ -3,6 +3,7 @@
 
 #include <Eigen/Eigen>
 #include <Eigen/StdVector>
+#include <cstdint>
 #include <cv_bridge/cv_bridge.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <iostream>
@@ -86,6 +87,8 @@ struct MappingParameters
 
   /* visualization and computation time display */
   double visualization_truncate_height_, virtual_ceil_height_, ground_height_, virtual_ceil_yp_, virtual_ceil_yn_;
+  double visualization_interval_;
+  int esdf_visualization_stride_;
   bool show_occ_time_;
 
   /* active mapping */
@@ -122,6 +125,7 @@ struct MappingData
   std::vector<unsigned char> static_miss_count_;
   ros::Time global_map_stamp_;
   bool global_esdf_pending_;
+  std::uint64_t dynamic_observation_seq_;
 
   std::vector<double> tmp_buffer1_, tmp_buffer2_;
   std::vector<double> distance_buffer_;
@@ -258,6 +262,7 @@ public:
   Eigen::Vector3d getOrigin();
   // int getVoxelNum();
   bool getOdomDepthTimeout() { return md_.flag_depth_odom_timeout_; }
+  std::uint64_t getDynamicObservationSeq() const { return md_.dynamic_observation_seq_; }
 
   // esdf
   template <typename F_get_val, typename F_set_val>

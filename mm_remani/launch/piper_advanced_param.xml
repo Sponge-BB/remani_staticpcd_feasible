@@ -47,8 +47,13 @@
 	                <param name="fsm/replan_feedback_yaw_threshold" value="0.15" type="double"/>
 	                <param name="fsm/global_plan_dynamic_lookahead_distance" value="2.0" type="double"/>
 	                <param name="fsm/global_plan_dynamic_far_sample_distance" value="0.10" type="double"/>
-	                <param name="fsm/global_plan_dynamic_immediate_confirm_distance" value="0.8" type="double"/>
+	                <param name="fsm/global_plan_dynamic_immediate_confirm_distance" value="1.0" type="double"/>
 	                <param name="fsm/global_plan_dynamic_confirm_frames" value="2" type="int"/>
+	                <param name="fsm/global_plan_dynamic_confirm_timeout" value="0.60" type="double"/>
+	                <param name="fsm/global_plan_dynamic_clear_hold_time" value="0.40" type="double"/>
+	                <param name="fsm/global_plan_dynamic_replan_hold_time" value="0.60" type="double"/>
+	                <param name="fsm/global_plan_dynamic_same_obstacle_radius" value="0.45" type="double"/>
+	                <param name="fsm/global_plan_dynamic_retry_interval" value="0.30" type="double"/>
 	                <param name="fsm/global_plan_dynamic_slowdown_distance" value="2.0" type="double"/>
 	                <param name="fsm/global_plan_dynamic_slowdown_min_speed" value="0.08" type="double"/>
 	                <param name="fsm/global_plan_dynamic_slowdown_max_speed" value="0.20" type="double"/>
@@ -61,6 +66,7 @@
                 <param name="fsm/fail_safe"               value="true"/>
                 <param name="fsm/global_plan"             value="true" />
                 <param name="search/max_seach_time"       value="0.9" type="double"/>
+                <param name="search/visualize_search"     value="false" type="bool"/>
                 <param name="grid_map/use_global_map"     value="true" />
                 <param name="grid_map/fuse_global_map"    value="true" />
                 <param name="grid_map/use_load_map"       value="true" />		<param name="grid_map/resolution"             value="0.05" /> 
@@ -105,6 +111,8 @@
 	
 		<param name="grid_map/virtual_ceil_height"              value="4.0"/>
 		<param name="grid_map/visualization_truncate_height"    value="2.8"/>
+		<param name="grid_map/visualization_interval"           value="0.20"/>
+		<param name="grid_map/esdf_visualization_stride"        value="2"/>
 		<param name="grid_map/show_occ_time"                    value="false"/>
 		<param name="grid_map/pose_type"                        value="2"/>  <!-- 2=ODOMETRY for LiDAR sync -->  
 		<param name="grid_map/frame_id"                         value="world"/>

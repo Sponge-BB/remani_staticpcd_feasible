@@ -78,8 +78,13 @@ fsm:
   replan_feedback_yaw_threshold: 0.15      # Feedback handoff threshold for the real base (rad)
   global_plan_dynamic_lookahead_distance: 2.0
   global_plan_dynamic_far_sample_distance: 0.10
-  global_plan_dynamic_immediate_confirm_distance: 0.8
+  global_plan_dynamic_immediate_confirm_distance: 1.0
   global_plan_dynamic_confirm_frames: 2
+  global_plan_dynamic_confirm_timeout: 0.60
+  global_plan_dynamic_clear_hold_time: 0.40
+  global_plan_dynamic_replan_hold_time: 0.60
+  global_plan_dynamic_same_obstacle_radius: 0.45
+  global_plan_dynamic_retry_interval: 0.30
   global_plan_dynamic_slowdown_distance: 2.0
   global_plan_dynamic_slowdown_min_speed: 0.08
   global_plan_dynamic_slowdown_max_speed: 0.20
@@ -98,3 +103,5 @@ grid_map:
   use_load_map: false     # Whether to use simulation map
   use_global_map: true # Whether to use global map
   dynamic_static_match_radius: 0.075
+  visualization_interval: 0.10
+  esdf_visualization_stride: 1

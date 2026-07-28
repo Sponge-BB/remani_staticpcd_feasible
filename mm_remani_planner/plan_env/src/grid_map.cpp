@@ -47,6 +47,10 @@ void GridMap::initMap(ros::NodeHandle &nh)
   node_.param("grid_map/virtual_ceil_height", mp_.virtual_ceil_height_, -0.1);
   node_.param("grid_map/virtual_ceil_yp", mp_.virtual_ceil_yp_, -0.1);
   node_.param("grid_map/virtual_ceil_yn", mp_.virtual_ceil_yn_, -0.1);
+  node_.param("grid_map/visualization_interval", mp_.visualization_interval_, 0.05);
+  node_.param("grid_map/esdf_visualization_stride", mp_.esdf_visualization_stride_, 1);
+  mp_.visualization_interval_ = std::max(0.05, mp_.visualization_interval_);
+  mp_.esdf_visualization_stride_ = std::max(1, mp_.esdf_visualization_stride_);
 
   node_.param("grid_map/show_occ_time", mp_.show_occ_time_, false);
   node_.param("grid_map/pose_type", mp_.pose_type_, 2);
@@ -129,6 +133,7 @@ void GridMap::initMap(ros::NodeHandle &nh)
   md_.static_miss_count_ = vector<unsigned char>(buffer_size, 0);
   md_.global_map_stamp_ = ros::Time(0);
   md_.global_esdf_pending_ = false;
+  md_.dynamic_observation_seq_ = 0;
 
   md_.astar_visited_ = vector<bool>(mp_.map_voxel_num_(0) * mp_.map_voxel_num_(1), false);
   md_.astar_free_length_ = vector<double>(mp_.map_voxel_num_(0) * mp_.map_voxel_num_(1), 1e10);
@@ -222,7 +227,8 @@ void GridMap::initMap(ros::NodeHandle &nh)
   
   occ_timer_  = node_.createTimer(ros::Duration(0.05), &GridMap::updateOccupancyCallback, this);
   esdf_timer_ = node_.createTimer(ros::Duration(0.05), &GridMap::updateESDFCallback, this);
-  vis_timer_  = node_.createTimer(ros::Duration(0.05), &GridMap::visCallback, this);
+  vis_timer_  = node_.createTimer(
+      ros::Duration(mp_.visualization_interval_), &GridMap::visCallback, this);
   
   map_pub_      = node_.advertise<sensor_msgs::PointCloud2>("grid_map/occupancy", 10);
   map_inf_pub_  = node_.advertise<sensor_msgs::PointCloud2>("grid_map/occupancy_inflate", 10);
@@ -951,6 +957,8 @@ void GridMap::updateOccupancyCallback(const ros::TimerEvent & /*event*/)
   ros::Time t1, t2;
   t1 = ros::Time::now();
 
+  const bool processed_lidar_observation = md_.lidar_origin_valid_;
+
   // Reset occupancy buffer within local bounds before raycasting.
   // This ensures cells NOT observed in the current frame revert to free/unknown,
   // eliminating ghost obstacles left by beams that took a different path.
@@ -970,6 +978,9 @@ void GridMap::updateOccupancyCallback(const ros::TimerEvent & /*event*/)
 
   if (md_.local_updated_)
     clearAndInflateLocalMap();
+
+  if (processed_lidar_observation)
+    ++md_.dynamic_observation_seq_;
 
   // Reset LiDAR origin flag so next cycle uses default camera_pos_ unless overridden
   md_.lidar_origin_valid_ = false;
@@ -1662,8 +1673,8 @@ void GridMap::publishESDF(){
   boundIndex(min_cut);
   boundIndex(max_cut);
 
-  for (int x = min_cut(0); x <= max_cut(0); ++x)
-    for (int y = min_cut(1); y <= max_cut(1); ++y) {
+  for (int x = min_cut(0); x <= max_cut(0); x += mp_.esdf_visualization_stride_)
+    for (int y = min_cut(1); y <= max_cut(1); y += mp_.esdf_visualization_stride_) {
 
       Eigen::Vector3d pos;
       indexToPos(Eigen::Vector3i(x, y, -0.5), pos);
