@@ -76,8 +76,18 @@ fsm:
   replan_trajectory_time: 0.4 # the expected max time of replanning trajectory, greater than max replan time
   replan_feedback_position_threshold: 0.08 # Feedback handoff threshold for the real base (m)
   replan_feedback_yaw_threshold: 0.15      # Feedback handoff threshold for the real base (rad)
-  global_plan_dynamic_confirm_frames: 3
-  global_plan_safety_replan_cooldown: 0.75
+  global_plan_dynamic_lookahead_distance: 2.0
+  global_plan_dynamic_far_sample_distance: 0.10
+  global_plan_dynamic_immediate_confirm_distance: 0.8
+  global_plan_dynamic_confirm_frames: 2
+  global_plan_dynamic_slowdown_distance: 2.0
+  global_plan_dynamic_slowdown_min_speed: 0.08
+  global_plan_dynamic_slowdown_max_speed: 0.20
+  global_plan_dynamic_emergency_deceleration: 0.35
+  global_plan_dynamic_emergency_reaction_time: 0.15
+  global_plan_dynamic_emergency_margin: 0.05
+  global_plan_dynamic_emergency_min_distance: 0.15
+  global_plan_dynamic_emergency_max_distance: 0.22
   global_plan_trial_times: 5  # Attempts per global planning cycle before yielding callbacks
   global_plan_max_failures: 5 # Give up an unreachable manual goal after this many failed cycles
   planning_horizon: 5.0       # Planning horizon (恢复为5.0，依靠前端A*作长距离导航)

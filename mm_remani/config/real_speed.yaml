@@ -34,12 +34,24 @@ remani_planner_node:
     emergency_time: 1
     # 全局路径模式下，每 0.1 秒前视 2 秒轨迹，以提前避开静态 PCD 与动态雷达障碍物
     global_plan_dynamic_lookahead_time: 2.0
+    # 时间前视只覆盖近场；空间前视沿轨迹继续检查到 2m。
+    global_plan_dynamic_lookahead_distance: 2.0
+    global_plan_dynamic_far_sample_distance: 0.10
     global_plan_dynamic_check_interval: 0.1
     global_plan_dynamic_check_time_step: 0.05
     global_plan_static_check_time_step: 0.1
-    # Dynamic points need three consecutive scans before they interrupt a bridge trajectory.
-    global_plan_dynamic_confirm_frames: 3
-    global_plan_safety_replan_cooldown: 0.75
+    # 0.8m 内单帧确认，较远处连续两帧确认。
+    global_plan_dynamic_immediate_confirm_distance: 0.8
+    global_plan_dynamic_confirm_frames: 2
+    # 障碍物进入空间前视后先连续限速，只有进入动态制动距离才急停。
+    global_plan_dynamic_slowdown_distance: 2.0
+    global_plan_dynamic_slowdown_min_speed: 0.08
+    global_plan_dynamic_slowdown_max_speed: 0.20
+    global_plan_dynamic_emergency_deceleration: 0.35
+    global_plan_dynamic_emergency_reaction_time: 0.15
+    global_plan_dynamic_emergency_margin: 0.05
+    global_plan_dynamic_emergency_min_distance: 0.15
+    global_plan_dynamic_emergency_max_distance: 0.22
     # 手动 2D 导航主轨迹保持当前机械臂姿态；避障结束后再原地恢复待机位。
     manual_target_end_arm_standby: false
     manual_restore_standby_after_goal: true

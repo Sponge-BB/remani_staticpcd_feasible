@@ -11,6 +11,7 @@
 #include <ros/package.h>
 #include <std_msgs/Empty.h>
 #include <std_msgs/Bool.h>
+#include <std_msgs/Float64.h>
 #include <std_msgs/Int32.h>
 #include <vector>
 #include <visualization_msgs/Marker.h>
@@ -89,8 +90,18 @@ namespace remani_planner
     double global_plan_dynamic_check_interval_;
     double global_plan_dynamic_check_time_step_;
     double global_plan_static_check_time_step_;
+    double global_plan_dynamic_lookahead_distance_;
+    double global_plan_dynamic_far_sample_distance_;
+    double global_plan_dynamic_immediate_confirm_distance_;
     int global_plan_dynamic_confirm_frames_;
-    double global_plan_safety_replan_cooldown_;
+    double global_plan_dynamic_slowdown_distance_;
+    double global_plan_dynamic_slowdown_min_speed_;
+    double global_plan_dynamic_slowdown_max_speed_;
+    double global_plan_dynamic_emergency_deceleration_;
+    double global_plan_dynamic_emergency_reaction_time_;
+    double global_plan_dynamic_emergency_margin_;
+    double global_plan_dynamic_emergency_min_distance_;
+    double global_plan_dynamic_emergency_max_distance_;
     int replan_fail_time_;
     int new_traj_fail_time_;
     int global_plan_max_failures_;
@@ -138,14 +149,15 @@ namespace remani_planner
     ros::Timer exec_timer_, safety_timer_;
     ros::Subscriber waypoint_sub_, odom_sub_, joint_state_sub_, gripper_state_sub_, trigger_sub_, assignment_sub_;
     ros::Publisher replan_pub_, new_pub_, poly_traj_pub_, data_disp_pub_, gripper_cmd_pub_, map_state_pub_;
+    ros::Publisher safety_speed_limit_pub_;
 
     ros::Publisher reached_pub_, start_pub_;
 
     ros::Time t_last_Astar_;
     ros::Time last_global_plan_dynamic_check_time_;
     ros::Time last_dynamic_collision_time_;
-    ros::Time safety_replan_cooldown_until_;
     int dynamic_collision_confirm_count_;
+    double current_safety_speed_limit_;
 
     int map_state_;
 
@@ -156,7 +168,7 @@ namespace remani_planner
     bool callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj);           // front-end and back-end method
     bool callEmergencyStop(Eigen::VectorXd stop_pos, double stop_yaw, const int singul); // front-end and back-end method
     bool planFromGlobalTraj(const int trial_times = 1);
-    bool planFromLocalTraj(bool flag_use_poly_init);
+    bool planFromLocalTraj(bool flag_use_poly_init, bool allow_random_retry = true);
     
     /* return value: std::pair< Times of the same state be continuously called, current continuously called state > */
     void changeFSMExecState(FSM_EXEC_STATE new_state, string pos_call);
@@ -166,6 +178,7 @@ namespace remani_planner
     /* ROS functions */
     void execFSMCallback(const ros::TimerEvent &e);
     void checkCollisionCallback(const ros::TimerEvent &e);
+    void publishSafetySpeedLimit(double speed_limit);
     bool validateStaticTrajectory(const SingulTrajData &traj, int &coll_type) const;
     bool planNextWaypoint(const Eigen::VectorXd next_wp, const double nect_yaw);
     void waypointCallback(const geometry_msgs::PoseStamped::ConstPtr &msg);

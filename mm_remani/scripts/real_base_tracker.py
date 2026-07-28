@@ -5,7 +5,7 @@ import rospy
 import math
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Float64, Float64MultiArray
 
 class RealBaseTracker:
     def __init__(self):
@@ -14,6 +14,7 @@ class RealBaseTracker:
         # 1. 发布给实车底盘的速度控制指令
         self.cmd_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
         self.err_pub = rospy.Publisher('/tracking_error', Float64MultiArray, queue_size=10)
+        self.safety_speed_limit = None
 
         # 2. 接收由 REMANI 规划器发出的期望轨迹点（包裹在 Twist 里）
         #    linear.x = 目标X坐标
@@ -26,6 +27,8 @@ class RealBaseTracker:
 
         # 3. 接收刚才写的实车的实时定位Odometry
         self.odom_sub = rospy.Subscriber('/odom', Odometry, self.odom_cb)
+        self.safety_speed_sub = rospy.Subscriber(
+            '/planning/safety_speed_limit', Float64, self.safety_speed_limit_cb)
 
         self.current_x = 0.0
         self.current_y = 0.0
@@ -90,6 +93,12 @@ class RealBaseTracker:
         self.target_w  = msg.angular.z
         self.has_target = True
         self.target_stamp = rospy.Time.now()
+
+    def safety_speed_limit_cb(self, msg):
+        if not math.isfinite(msg.data) or msg.data < 0.0:
+            self.safety_speed_limit = None
+            return
+        self.safety_speed_limit = max(0.0, msg.data)
 
     def publish_stop(self):
         self.last_cmd = Twist()
@@ -184,6 +193,10 @@ class RealBaseTracker:
             else:
                 rospy.logwarn_throttle(1.0, "Blocked non-local reverse cmd_vel request")
                 cmd.linear.x = 0.0
+
+        if self.safety_speed_limit is not None:
+            cmd.linear.x = max(-self.safety_speed_limit,
+                               min(self.safety_speed_limit, cmd.linear.x))
 
         # Keep trajectory handoffs physically smooth. The polynomial trajectory
         # already respects planning limits; this only bounds tracker corrections.

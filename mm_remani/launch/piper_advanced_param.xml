@@ -45,8 +45,18 @@
 	                <param name="fsm/replan_trajectory_time"  value="0.4" type="double"/>
 	                <param name="fsm/replan_feedback_position_threshold" value="0.08" type="double"/>
 	                <param name="fsm/replan_feedback_yaw_threshold" value="0.15" type="double"/>
-	                <param name="fsm/global_plan_dynamic_confirm_frames" value="3" type="int"/>
-	                <param name="fsm/global_plan_safety_replan_cooldown" value="0.75" type="double"/>
+	                <param name="fsm/global_plan_dynamic_lookahead_distance" value="2.0" type="double"/>
+	                <param name="fsm/global_plan_dynamic_far_sample_distance" value="0.10" type="double"/>
+	                <param name="fsm/global_plan_dynamic_immediate_confirm_distance" value="0.8" type="double"/>
+	                <param name="fsm/global_plan_dynamic_confirm_frames" value="2" type="int"/>
+	                <param name="fsm/global_plan_dynamic_slowdown_distance" value="2.0" type="double"/>
+	                <param name="fsm/global_plan_dynamic_slowdown_min_speed" value="0.08" type="double"/>
+	                <param name="fsm/global_plan_dynamic_slowdown_max_speed" value="0.20" type="double"/>
+	                <param name="fsm/global_plan_dynamic_emergency_deceleration" value="0.35" type="double"/>
+	                <param name="fsm/global_plan_dynamic_emergency_reaction_time" value="0.15" type="double"/>
+	                <param name="fsm/global_plan_dynamic_emergency_margin" value="0.05" type="double"/>
+	                <param name="fsm/global_plan_dynamic_emergency_min_distance" value="0.15" type="double"/>
+	                <param name="fsm/global_plan_dynamic_emergency_max_distance" value="0.22" type="double"/>
 	                <param name="fsm/emergency_time"          value="0.8" type="double"/>
                 <param name="fsm/fail_safe"               value="true"/>
                 <param name="fsm/global_plan"             value="true" />
