@@ -29,6 +29,12 @@ namespace remani_planner
     nh.param("fsm/replan_trajectory_time", replan_trajectory_time_, 0.0);
     nh.param("fsm/replan_feedback_position_threshold", replan_feedback_position_threshold_, 0.08);
     nh.param("fsm/replan_feedback_yaw_threshold", replan_feedback_yaw_threshold_, 0.15);
+    nh.param("fsm/replan_feedback_arm_threshold", replan_feedback_arm_threshold_, 0.10);
+    nh.param("fsm/goal_position_tolerance", goal_position_tolerance_, 0.10);
+    nh.param("fsm/goal_yaw_tolerance", goal_yaw_tolerance_, 0.15);
+    nh.param("fsm/goal_arm_tolerance", goal_arm_tolerance_, 0.12);
+    nh.param("fsm/actual_state_collision_check_interval",
+             actual_state_collision_check_interval_, 0.05);
     nh.param("fsm/global_plan_dynamic_lookahead_time", global_plan_dynamic_lookahead_time_, 2.0);
     nh.param("fsm/global_plan_dynamic_check_interval", global_plan_dynamic_check_interval_, 0.1);
     nh.param("fsm/global_plan_dynamic_check_time_step", global_plan_dynamic_check_time_step_, 0.05);
@@ -92,7 +98,14 @@ namespace remani_planner
     rear_goal_plan_cos_ = std::max(-1.0, std::min(1.0, rear_goal_plan_cos_));
     replan_feedback_position_threshold_ = std::max(0.0, replan_feedback_position_threshold_);
     replan_feedback_yaw_threshold_ = std::max(0.0, replan_feedback_yaw_threshold_);
+    replan_feedback_arm_threshold_ = std::max(0.0, replan_feedback_arm_threshold_);
+    goal_position_tolerance_ = std::max(0.01, goal_position_tolerance_);
+    goal_yaw_tolerance_ = std::max(0.01, goal_yaw_tolerance_);
+    goal_arm_tolerance_ = std::max(0.01, goal_arm_tolerance_);
+    actual_state_collision_check_interval_ =
+        std::max(0.01, actual_state_collision_check_interval_);
     last_global_plan_dynamic_check_time_ = ros::Time(0);
+    last_actual_state_collision_check_time_ = ros::Time(0);
     last_dynamic_collision_time_ = ros::Time(0);
     last_dynamic_seen_time_ = ros::Time(0);
     dynamic_replan_hold_until_ = ros::Time(0);
@@ -273,7 +286,9 @@ namespace remani_planner
       // std::cout << "gen new traj 2\n";
       if (success){
         new_traj_fail_time_ = 0;
-        if (!dynamic_safety_speed_limit_active_)
+        if (dynamic_safety_speed_limit_active_)
+          clearDynamicSafetySpeedLimit(ros::Time::now(), true);
+        else
           publishSafetySpeedLimit(-1.0);
         changeFSMExecState(EXEC_TRAJ, "FSM");
         flag_escape_emergency_ = true;
@@ -359,6 +374,17 @@ namespace remani_planner
       Eigen::VectorXd pos = info->getPos(t_cur);
       bool touch_the_goal = ((local_target_pt_ - end_pt_).norm() < 1e-2);
       bool close_to_no_replan_thresh = ((end_pt_ - pos).head(2).norm() < no_replan_thresh_);
+      const double actual_goal_position_error =
+          (mm_state_pos_.head(2) - end_pt_.head(2)).norm();
+      const double actual_goal_yaw_error =
+          fabs(atan2(sin(mm_car_yaw_ - end_yaw_), cos(mm_car_yaw_ - end_yaw_)));
+      const double actual_goal_arm_error =
+          (mm_state_pos_.segment(mobile_base_dim_, manipulator_dim_) -
+           end_pt_.segment(mobile_base_dim_, manipulator_dim_)).cwiseAbs().maxCoeff();
+      const bool actual_at_goal =
+          actual_goal_position_error <= goal_position_tolerance_ &&
+          actual_goal_yaw_error <= goal_yaw_tolerance_ &&
+          actual_goal_arm_error <= goal_arm_tolerance_;
 
       if((target_type_ == TARGET_TYPE::PRESET_TARGET) && close_to_no_replan_thresh){
         if((wpt_id_ < waypoint_num_ - 1) && need_to_plan_next){
@@ -376,7 +402,8 @@ namespace remani_planner
           map_state.data = map_state_;
           gripper_flag_ = false;
         }
-      }else if(target_type_ == TARGET_TYPE::MANUAL_TARGET && t_cur > info->duration - 1e-2 && touch_the_goal){
+      }else if(target_type_ == TARGET_TYPE::MANUAL_TARGET && trajectory_finished &&
+               touch_the_goal && actual_at_goal){
         const double arm_standby_error = has_default_arm_ ?
             (mm_state_pos_.segment(mobile_base_dim_, manipulator_dim_) - default_arm_config_).norm() : 0.0;
         const bool need_manual_restore =
@@ -418,7 +445,7 @@ namespace remani_planner
           reached_pub_.publish(msg);
           goto force_return;
         }
-      }else if(t_cur > info->duration - 1e-2 && touch_the_goal){
+      }else if(trajectory_finished && touch_the_goal && actual_at_goal){
         if(target_type_ != TARGET_TYPE::PRESET_TARGET && wpt_id_ >= waypoint_num_ - 1){
           have_target_ = false;
           have_trigger_ = false;
@@ -429,6 +456,15 @@ namespace remani_planner
           reached_pub_.publish(msg);
           goto force_return;
         }
+      }else if(trajectory_finished && touch_the_goal && !actual_at_goal){
+        ROS_WARN_THROTTLE(
+            1.0,
+            "[FSM] Reference trajectory ended before the real robot reached the goal "
+            "(base=%.3f m, yaw=%.3f rad, arm=%.3f rad); replan from feedback.",
+            actual_goal_position_error, actual_goal_yaw_error, actual_goal_arm_error);
+        have_local_traj_ = false;
+        changeFSMExecState(GEN_NEW_TRAJ, "GOAL_FEEDBACK");
+        goto force_return;
       }else if(!close_to_no_replan_thresh && t_cur > replan_thresh_ && (!global_plan_)){
         changeFSMExecState(REPLAN_TRAJ, "FSM");
       }
@@ -577,6 +613,8 @@ namespace remani_planner
       publishSafetySpeedLimit(-1.0);
       return;
     }
+    if (exec_state_ == EMERGENCY_STOP)
+      return;
     /* ---------- check lost of depth ---------- */
     if (map->getOdomDepthTimeout()){
       ROS_ERROR("Depth Lost! EMERGENCY_STOP");
@@ -606,6 +644,28 @@ namespace remani_planner
     int coll_type;
 
     if (global_plan_) {
+      const bool time_for_actual_state_check =
+          last_actual_state_collision_check_time_.isZero() ||
+          (now - last_actual_state_collision_check_time_).toSec() >=
+              actual_state_collision_check_interval_;
+      if (has_default_arm_ && time_for_actual_state_check){
+        last_actual_state_collision_check_time_ = now;
+        int actual_coll_type = -1;
+        if (planner_manager_->mm_config_->checkcollision(
+                Eigen::Vector3d(mm_state_pos_(0), mm_state_pos_(1), mm_car_yaw_),
+                mm_state_pos_.segment(mobile_base_dim_, manipulator_dim_),
+                false, actual_coll_type)){
+          ROS_ERROR_THROTTLE(
+              1.0,
+              "[FSM] Real whole-body state is in collision (type=%d); stop before using nominal trajectory.",
+              actual_coll_type);
+          dynamic_replan_retry_pending_ = false;
+          publishSafetySpeedLimit(0.0);
+          changeFSMExecState(EMERGENCY_STOP, "ACTUAL_STATE");
+          return;
+        }
+      }
+
       // Keep current-pose checking at 100 Hz for emergency reaction.
       if (planner_manager_->ploy_traj_opt_->checkCollision(*info, t_cur, coll_type)){
         if(coll_type == 0){
@@ -736,7 +796,8 @@ namespace remani_planner
             }
           }
           clearDynamicSafetySpeedLimit(now);
-          if (dynamic_replan_retry_pending_ && !dynamic_safety_speed_limit_active_) {
+          if (dynamic_replan_retry_pending_ && !dynamic_safety_speed_limit_active_ &&
+              exec_state_ == REPLAN_TRAJ && have_controller_progress_) {
             dynamic_replan_retry_pending_ = false;
             changeFSMExecState(EXEC_TRAJ, "SAFETY_CLEAR");
           }
@@ -1164,7 +1225,7 @@ namespace remani_planner
     start_jer_   = info->getJer(t_cur) *
                    (current_time_scale * current_time_scale * current_time_scale);
     start_singul_ = info->getSingul(t_cur);
-    if(start_vel_.norm() >= mobile_base_non_singul_vel_) start_yaw_ = atan2(start_singul_ * start_vel_(1), start_singul_ * start_vel_(0));
+    if(start_vel_.head(2).norm() >= mobile_base_non_singul_vel_) start_yaw_ = atan2(start_singul_ * start_vel_(1), start_singul_ * start_vel_(0));
     else start_yaw_ = mm_car_yaw_;
 
     // The original handoff assumed that the physical base stayed exactly on the
@@ -1172,6 +1233,9 @@ namespace remani_planner
     // the next trajectory starts from the real robot's predicted location.
     const Eigen::VectorXd expected_now = info->getPos(t_now);
     const Eigen::Vector2d position_error = mm_state_pos_.head(2) - expected_now.head(2);
+    const Eigen::VectorXd arm_position_error =
+        mm_state_pos_.segment(mobile_base_dim_, manipulator_dim_) -
+        expected_now.segment(mobile_base_dim_, manipulator_dim_);
     const Eigen::VectorXd expected_now_vel = info->getVel(t_now);
     const int expected_now_singul = info->getSingul(t_now);
     const double expected_now_yaw = expected_now_vel.head(2).norm() >= mobile_base_non_singul_vel_
@@ -1185,6 +1249,15 @@ namespace remani_planner
       start_yaw_ = atan2(sin(start_yaw_ + yaw_error), cos(start_yaw_ + yaw_error));
       ROS_WARN("[FSM] Replan handoff feedback: pos_error=%.3f m, yaw_error=%.3f rad, predicted_start=(%.3f, %.3f)",
                position_error.norm(), yaw_error, start_pos_(0), start_pos_(1));
+    }
+    if(arm_position_error.cwiseAbs().maxCoeff() > replan_feedback_arm_threshold_){
+      start_pos_.segment(mobile_base_dim_, manipulator_dim_) += arm_position_error;
+      start_vel_.segment(mobile_base_dim_, manipulator_dim_) =
+          mm_state_vel_.segment(mobile_base_dim_, manipulator_dim_);
+      start_acc_.segment(mobile_base_dim_, manipulator_dim_).setZero();
+      start_jer_.segment(mobile_base_dim_, manipulator_dim_).setZero();
+      ROS_WARN("[FSM] Replan handoff uses measured arm state (max error %.3f rad).",
+               arm_position_error.cwiseAbs().maxCoeff());
     }
 
     bool success = callReboundReplan(flag_use_poly_init, false);
@@ -1333,6 +1406,7 @@ namespace remani_planner
 
   bool REMANIReplanFSM::callEmergencyStop(Eigen::VectorXd stop_pos, double stop_yaw, const int singul){
     std::cout << "\033[31mcall EmergencyStop\033[0m" << std::endl;
+    dynamic_replan_retry_pending_ = false;
     planner_manager_->EmergencyStop(stop_pos, stop_yaw, singul);
     quadrotor_msgs::PolynomialTraj msg;
     msg.action = quadrotor_msgs::PolynomialTraj::ACTION_ABORT;

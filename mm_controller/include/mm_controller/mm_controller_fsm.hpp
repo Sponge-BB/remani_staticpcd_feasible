@@ -50,6 +50,7 @@ private:
 	int mobile_base_dof_, manipulator_dof_;
 	ros::Publisher traj_start_trigger_pub_, trajectory_progress_pub_;
 	ros::Publisher car_cmd_pub_, mani_cmd_pub_, gripper_cmd_pub_;
+	ros::Publisher arm_tracking_error_pub_;
 	State_t fsm_state_; // Should only be changed in PX4CtrlFSM::process() function!
 	Exec_Traj_State_t exec_traj_state_;
 	Eigen::VectorXd init_theta_;
@@ -67,9 +68,16 @@ private:
 	double virtual_time_min_reference_speed_;
 	double virtual_time_scale_rise_rate_;
 	double virtual_time_scale_fall_rate_;
+	double arm_tracking_slow_error_;
+	double arm_tracking_stop_error_;
+	double arm_tracking_resume_error_;
+	double arm_tracking_min_time_scale_;
+	double arm_tracking_joint_timeout_;
 	double safety_speed_limit_;
 	double virtual_traj_time_;
 	double virtual_time_scale_;
+	double max_arm_tracking_error_;
+	bool arm_tracking_hold_active_;
 	std::uint64_t active_trajectory_seq_;
 	ros::Time last_virtual_clock_stamp_;
 	ros::Time trajectory_activation_stamp_;

@@ -88,6 +88,11 @@ namespace remani_planner
     double replan_trajectory_time_;
     double replan_feedback_position_threshold_;
     double replan_feedback_yaw_threshold_;
+    double replan_feedback_arm_threshold_;
+    double goal_position_tolerance_;
+    double goal_yaw_tolerance_;
+    double goal_arm_tolerance_;
+    double actual_state_collision_check_interval_;
     double global_plan_dynamic_lookahead_time_;
     double global_plan_dynamic_check_interval_;
     double global_plan_dynamic_check_time_step_;
@@ -168,6 +173,7 @@ namespace remani_planner
 
     ros::Time t_last_Astar_;
     ros::Time last_global_plan_dynamic_check_time_;
+    ros::Time last_actual_state_collision_check_time_;
     ros::Time last_dynamic_collision_time_;
     ros::Time last_dynamic_seen_time_;
     ros::Time dynamic_replan_hold_until_;

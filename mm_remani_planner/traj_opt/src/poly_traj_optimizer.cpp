@@ -21,7 +21,11 @@ namespace remani_planner
     nh.param("optimization/weight_manipulator_self", wei_mani_self_, -1.0);
     nh.param("optimization/weight_manipulator_feasibility", wei_mani_feas_, -1.0);
     nh.param("optimization/weight_manipulator_hold", wei_mani_hold_, 0.0);
+    nh.param("optimization/manipulator_hold_disable_path_deviation",
+             mani_hold_disable_path_deviation_, 0.35);
     wei_mani_hold_ = std::max(0.0, wei_mani_hold_);
+    mani_hold_disable_path_deviation_ =
+        std::max(0.0, mani_hold_disable_path_deviation_);
 
     nh.param("optimization/dense_sample_resolution", dense_sample_resolution_, -1);
 
@@ -101,6 +105,23 @@ namespace remani_planner
       mani_hold_reference_ = iniState_container_.front().col(0).tail(manipulator_dof_);
       const Eigen::VectorXd end_arm = finState_container_.back().col(0).tail(manipulator_dof_);
       mani_hold_enabled_ = (end_arm - mani_hold_reference_).norm() < 1e-3;
+      double max_frontend_arm_deviation = 0.0;
+      for(const auto &inner_points : initInnerPts_container){
+        if(inner_points.rows() < mobile_base_dof_ + manipulator_dof_)
+          continue;
+        for(int col = 0; col < inner_points.cols(); ++col){
+          max_frontend_arm_deviation = std::max(
+              max_frontend_arm_deviation,
+              (inner_points.col(col).tail(manipulator_dof_) -
+               mani_hold_reference_).norm());
+        }
+      }
+      if(mani_hold_enabled_ &&
+         max_frontend_arm_deviation >= mani_hold_disable_path_deviation_){
+        mani_hold_enabled_ = false;
+        ROS_INFO("[Optimizer] Disable arm hold for clearance motion (front-end deviation %.3f rad).",
+                 max_frontend_arm_deviation);
+      }
     }
     variable_num_ = 0;
     SnapOpt_container_.clear();

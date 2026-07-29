@@ -66,6 +66,7 @@ namespace remani_planner
     double non_singul_v_ = 0.01;
     bool opt_gear_ = true;
     double wei_mani_hold_ = 0.0;
+    double mani_hold_disable_path_deviation_ = 0.35;
     bool mani_hold_enabled_ = false;
     Eigen::VectorXd mani_hold_reference_;
 

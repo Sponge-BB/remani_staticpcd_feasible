@@ -14,10 +14,9 @@ remani_planner_node:
     mobile_base_max_wheel_alpha: 15.0
     # 底盘最小非奇异速度 (m/s)，避免差速模型在零速附近的奇异性
     mobile_base_non_singul_vel: 0.05
-    # 机械臂最大关节速度 (rad/s)
-    manipulator_max_vel: 1.57
-    # 机械臂最大关节加速度 (rad/s²)
-    manipulator_max_acc: 3.14
+    # fixed_vel=15 时实测关节速度约 0.45rad/s，规划模型不得高估执行能力。
+    manipulator_max_vel: 0.45
+    manipulator_max_acc: 0.90
 
   # --- 反应式避障: FSM 重规划参数 ---
   fsm:
@@ -28,6 +27,12 @@ remani_planner_node:
     # 实车偏离旧轨迹超过该值时，以里程计残差修正下一条轨迹的交接起点。
     replan_feedback_position_threshold: 0.08
     replan_feedback_yaw_threshold: 0.15
+    replan_feedback_arm_threshold: 0.10
+    # 轨迹结束后必须由真实整机状态确认到达，避免急停轨迹被误判为目标轨迹。
+    goal_position_tolerance: 0.10
+    goal_yaw_tolerance: 0.15
+    goal_arm_tolerance: 0.12
+    actual_state_collision_check_interval: 0.05
     # 靠近目标时停止重规划的距离阈值 (米)
     thresh_no_replan_meter: 1.0
     # 紧急停车时间窗口 (秒)，碰撞距离<此值时触发急停
@@ -94,6 +99,8 @@ remani_planner_node:
   optimization:
     # 起终机械臂姿态相同时，轻度偏好当前姿态，但给桥下避障留下足够调整空间。
     weight_manipulator_hold: 2.0
+    # 前端已规划出明显避障动作时关闭保持代价，避免把桥下动作压到最后。
+    manipulator_hold_disable_path_deviation: 0.35
 
   # --- ESDF 地图障碍物膨胀 ---
   grid_map:
@@ -116,6 +123,15 @@ remani_planner_node:
 piper_ctrl_single_node:
   # 固定关节运动速度 (范围 0-100, 推荐 20-60)
   fixed_vel: 15
+
+mm_controller_node:
+  controller:
+    # 机械臂滞后时连续缩放整机轨迹时钟，让底盘等待机械臂完成避障。
+    arm_tracking_slow_error: 0.10
+    arm_tracking_stop_error: 0.25
+    arm_tracking_resume_error: 0.06
+    arm_tracking_min_time_scale: 0.10
+    arm_tracking_joint_timeout: 0.25
 
 # --- 实车底盘轨迹追踪器的安全死区 ---
 real_base_tracker:

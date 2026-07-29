@@ -54,6 +54,7 @@ controller:
 optimization:
   weight_obstacle          : 50000.0  # Weight for obstacle
   weight_manipulator_hold  : 2.0      # Prefer the current pose without blocking necessary clearance motion
+  manipulator_hold_disable_path_deviation: 0.35 # Disable hold when the front end found a real clearance maneuver
   weight_manipulator_self       : 1000.0   # Weight for self collision
   weight_base_feasibility       : 100.0    # Weight for base feasibility
   weight_manipulator_feasibility: 100.0    # Weight for manipulator feasibility
@@ -83,6 +84,11 @@ fsm:
   replan_trajectory_time: 0.4 # the expected max time of replanning trajectory, greater than max replan time
   replan_feedback_position_threshold: 0.08 # Feedback handoff threshold for the real base (m)
   replan_feedback_yaw_threshold: 0.15      # Feedback handoff threshold for the real base (rad)
+  replan_feedback_arm_threshold: 0.10      # Use measured arm state when a rolling handoff drifts (rad)
+  goal_position_tolerance: 0.10
+  goal_yaw_tolerance: 0.15
+  goal_arm_tolerance: 0.12
+  actual_state_collision_check_interval: 0.05
   global_plan_dynamic_lookahead_distance: 2.0
   global_plan_dynamic_far_sample_distance: 0.10
   global_plan_dynamic_immediate_confirm_distance: 1.0

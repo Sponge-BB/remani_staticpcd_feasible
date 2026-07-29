@@ -14,6 +14,11 @@ MMControllerFSM::MMControllerFSM(const ros::NodeHandle& nh) : nh_(nh){
 	nh_.param("controller/virtual_time_min_reference_speed", virtual_time_min_reference_speed_, 0.05);
 	nh_.param("controller/virtual_time_scale_rise_rate", virtual_time_scale_rise_rate_, 0.8);
 	nh_.param("controller/virtual_time_scale_fall_rate", virtual_time_scale_fall_rate_, 2.0);
+	nh_.param("controller/arm_tracking_slow_error", arm_tracking_slow_error_, 0.10);
+	nh_.param("controller/arm_tracking_stop_error", arm_tracking_stop_error_, 0.25);
+	nh_.param("controller/arm_tracking_resume_error", arm_tracking_resume_error_, 0.06);
+	nh_.param("controller/arm_tracking_min_time_scale", arm_tracking_min_time_scale_, 0.10);
+	nh_.param("controller/arm_tracking_joint_timeout", arm_tracking_joint_timeout_, 0.25);
 	yaw_hold_speed_ = std::max(0.0, yaw_hold_speed_);
 	curvature_ff_start_speed_ = std::max(0.0, curvature_ff_start_speed_);
 	curvature_ff_full_speed_ = std::max(curvature_ff_start_speed_ + 1e-3,
@@ -23,9 +28,19 @@ MMControllerFSM::MMControllerFSM(const ros::NodeHandle& nh) : nh_(nh){
 	virtual_time_min_reference_speed_ = std::max(0.01, virtual_time_min_reference_speed_);
 	virtual_time_scale_rise_rate_ = std::max(0.01, virtual_time_scale_rise_rate_);
 	virtual_time_scale_fall_rate_ = std::max(0.01, virtual_time_scale_fall_rate_);
+	arm_tracking_slow_error_ = std::max(0.01, arm_tracking_slow_error_);
+	arm_tracking_stop_error_ =
+		std::max(arm_tracking_slow_error_ + 0.01, arm_tracking_stop_error_);
+	arm_tracking_resume_error_ =
+		std::max(0.0, std::min(arm_tracking_slow_error_, arm_tracking_resume_error_));
+	arm_tracking_min_time_scale_ =
+		std::max(0.0, std::min(1.0, arm_tracking_min_time_scale_));
+	arm_tracking_joint_timeout_ = std::max(0.05, arm_tracking_joint_timeout_);
 	safety_speed_limit_ = -1.0;
 	virtual_traj_time_ = 0.0;
 	virtual_time_scale_ = 1.0;
+	max_arm_tracking_error_ = 0.0;
+	arm_tracking_hold_active_ = false;
 	active_trajectory_seq_ = 0;
 	last_virtual_clock_stamp_ = ros::Time(0);
 	trajectory_activation_stamp_ = ros::Time(0);
@@ -47,6 +62,7 @@ MMControllerFSM::MMControllerFSM(const ros::NodeHandle& nh) : nh_(nh){
 	gripper_cmd_pub_ = nh_.advertise<std_msgs::Bool>("gripper_cmd", 10);
     traj_start_trigger_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("/traj_start_trigger", 10);
 	trajectory_progress_pub_ = nh_.advertise<geometry_msgs::Vector3Stamped>("trajectory_progress", 1);
+	arm_tracking_error_pub_ = nh_.advertise<std_msgs::Float64>("arm_tracking_error", 1);
 
 	state_data.setParam(manipulator_dof_);
 	fsm_state_ = AUTO_STAY;
@@ -243,6 +259,8 @@ void MMControllerFSM::syncTrajectoryClock(const ros::Time &now){
 	active_trajectory_seq_ = trajectory_data.update_seq;
 	virtual_traj_time_ = 0.0;
 	virtual_time_scale_ = trajectory_data.exec_traj == 1 ? 1.0 : 0.0;
+	max_arm_tracking_error_ = 0.0;
+	arm_tracking_hold_active_ = false;
 	last_virtual_clock_stamp_ = now;
 	trajectory_activation_stamp_ = now;
 	if(trajectory_data.exec_traj == 1 &&
@@ -270,11 +288,12 @@ void MMControllerFSM::advanceTrajectoryClock(const ros::Time &now){
 		return;
 
 	double target_scale = 1.0;
+	bool force_freeze = false;
 	const bool odom_fresh =
 		!state_data.odom_rcv_stamp.isZero() &&
 		(now - state_data.odom_rcv_stamp).toSec() <= odom_timeout_;
 	if(!odom_fresh){
-		target_scale = 0.0;
+		force_freeze = true;
 		ROS_ERROR_THROTTLE(1.0, "[MMctrl] Odom stale; freezing trajectory clock.");
 	}else if(safety_speed_limit_ >= 0.0){
 		const double sample_time = std::min(
@@ -283,14 +302,70 @@ void MMControllerFSM::advanceTrajectoryClock(const ros::Time &now){
 			trajectory_data.singul_traj_data.getVel(sample_time);
 		const double reference_speed =
 			reference_velocity.head(mobile_base_dof_).norm();
-		target_scale = safety_speed_limit_ <= 1e-3
-			? 0.0
-			: std::min(
-				1.0, safety_speed_limit_ /
+		if(safety_speed_limit_ <= 1e-3){
+			force_freeze = true;
+		}else{
+			target_scale = std::min(
+				target_scale, safety_speed_limit_ /
 					std::max(reference_speed, virtual_time_min_reference_speed_));
+		}
 	}
 
-	if(target_scale <= 1e-6){
+	const bool joint_fresh =
+		state_data.have_mani_ &&
+		!state_data.joint_rcv_stamp.isZero() &&
+		(now - state_data.joint_rcv_stamp).toSec() <= arm_tracking_joint_timeout_;
+	if(!joint_fresh){
+		force_freeze = true;
+		ROS_ERROR_THROTTLE(1.0, "[MMctrl] Joint state stale; freezing trajectory clock.");
+	}else{
+		const double sample_time = std::min(
+			virtual_traj_time_, trajectory_data.singul_traj_data.duration);
+		const Eigen::VectorXd reference_position =
+			trajectory_data.singul_traj_data.getPos(sample_time);
+		if(reference_position.size() >= mobile_base_dof_ + manipulator_dof_ &&
+		   state_data.joint_p.size() == manipulator_dof_){
+			max_arm_tracking_error_ =
+				(reference_position.tail(manipulator_dof_) -
+				 state_data.joint_p).cwiseAbs().maxCoeff();
+
+			if(arm_tracking_hold_active_ &&
+			   max_arm_tracking_error_ <= arm_tracking_resume_error_){
+				arm_tracking_hold_active_ = false;
+				ROS_INFO("[MMctrl] Arm tracking recovered (max error %.3f rad).",
+				         max_arm_tracking_error_);
+			}else if(!arm_tracking_hold_active_ &&
+			         max_arm_tracking_error_ >= arm_tracking_stop_error_){
+				arm_tracking_hold_active_ = true;
+				ROS_WARN("[MMctrl] Arm tracking error %.3f rad; pause base progress until the arm catches up.",
+				         max_arm_tracking_error_);
+			}
+
+			if(arm_tracking_hold_active_){
+				target_scale = 0.0;
+			}else if(max_arm_tracking_error_ > arm_tracking_slow_error_){
+				const double ratio = std::max(
+					0.0, std::min(
+						1.0,
+						(arm_tracking_stop_error_ - max_arm_tracking_error_) /
+						(arm_tracking_stop_error_ - arm_tracking_slow_error_)));
+				const double arm_scale =
+					arm_tracking_min_time_scale_ +
+					ratio * (1.0 - arm_tracking_min_time_scale_);
+				target_scale = std::min(target_scale, arm_scale);
+				ROS_WARN_THROTTLE(
+					1.0,
+					"[MMctrl] Arm tracking error %.3f rad; scale whole-body progress to %.2f.",
+					max_arm_tracking_error_, target_scale);
+			}
+		}
+	}
+
+	std_msgs::Float64 arm_error_msg;
+	arm_error_msg.data = max_arm_tracking_error_;
+	arm_tracking_error_pub_.publish(arm_error_msg);
+
+	if(force_freeze){
 		virtual_time_scale_ = 0.0;
 	}else{
 		const double rate = target_scale > virtual_time_scale_
