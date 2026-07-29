@@ -228,6 +228,10 @@
     <param name="output_topic" value="/livox/lidar_pcl2" />
     <param name="subscriber_queue_size" value="1" />
     <param name="publisher_queue_size" value="1" />
+    <!-- MID360 uses tag bits 0..5 for adhesion, particles and other confidence flags.
+         Filter these marked points in the bridge so downstream PCL/GridMap work is reduced. -->
+    <param name="filter_low_confidence_tags" value="true" />
+    <param name="low_confidence_tag_mask" type="int" value="63" />
   </node>
 
   <!-- 0. nodelet 管理器 -->
