@@ -10,6 +10,7 @@
 #include <sys/time.h>
 #include <ctime>
 #include <math.h>
+#include <algorithm>
 #include "optimizer/lbfgs.hpp"
 #include "plan_env/grid_map.h"
 #include "traj_utils/plan_container.hpp"
@@ -147,6 +148,10 @@ namespace remani_planner
     inline const poly_traj::MinSnapOpt<8> *getMinJerkOptPtr(void) { return &SnapOpt_; }
     inline const std::vector<poly_traj::MinSnapOpt<8>> *getMinSnapOptContainerPtr(void) { return &SnapOpt_container_; }
     inline int get_cps_num_prePiece_(){return cps_num_prePiece_;};
+    inline double getMaxWallTime() const { return max_wall_time_; }
+    inline void setMaxWallTime(double max_wall_time) {
+      max_wall_time_ = std::max(0.2, max_wall_time);
+    }
     bool checkCollision(const SingulTrajData &traj, double t, int &coll_type);
     bool checkDynamicObstacleCollision(const SingulTrajData &traj, double t, int &coll_type);
 

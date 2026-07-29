@@ -51,6 +51,8 @@ namespace remani_planner
     nh.param("fsm/global_plan_dynamic_replan_hold_time", global_plan_dynamic_replan_hold_time_, 0.6);
     nh.param("fsm/global_plan_dynamic_same_obstacle_radius", global_plan_dynamic_same_obstacle_radius_, 0.45);
     nh.param("fsm/global_plan_dynamic_retry_interval", global_plan_dynamic_retry_interval_, 0.3);
+    nh.param("fsm/global_plan_dynamic_fast_replan_wall_time",
+             global_plan_dynamic_fast_replan_wall_time_, 0.6);
     nh.param("fsm/global_plan_dynamic_max_replans_per_event",
              global_plan_dynamic_max_replans_per_event_, 2);
     nh.param("fsm/global_plan_dynamic_slowdown_distance", global_plan_dynamic_slowdown_distance_, 2.0);
@@ -87,6 +89,8 @@ namespace remani_planner
     global_plan_dynamic_replan_hold_time_ = std::max(0.0, global_plan_dynamic_replan_hold_time_);
     global_plan_dynamic_same_obstacle_radius_ = std::max(0.0, global_plan_dynamic_same_obstacle_radius_);
     global_plan_dynamic_retry_interval_ = std::max(0.05, global_plan_dynamic_retry_interval_);
+    global_plan_dynamic_fast_replan_wall_time_ =
+        std::max(0.2, global_plan_dynamic_fast_replan_wall_time_);
     global_plan_dynamic_slowdown_distance_ = std::max(0.0, global_plan_dynamic_slowdown_distance_);
     global_plan_dynamic_slowdown_min_speed_ = std::max(0.0, global_plan_dynamic_slowdown_min_speed_);
     global_plan_dynamic_slowdown_max_speed_ = std::max(global_plan_dynamic_slowdown_min_speed_,
@@ -113,7 +117,7 @@ namespace remani_planner
         std::max(0.01, actual_state_collision_check_interval_);
     actual_base_emergency_margin_ = std::max(0.0, actual_base_emergency_margin_);
     global_plan_dynamic_max_replans_per_event_ =
-        std::max(1, global_plan_dynamic_max_replans_per_event_);
+        std::max(2, global_plan_dynamic_max_replans_per_event_);
     global_plan_max_wall_time_ = std::max(0.5, global_plan_max_wall_time_);
     last_global_plan_dynamic_check_time_ = ros::Time(0);
     last_actual_state_collision_check_time_ = ros::Time(0);
@@ -131,6 +135,8 @@ namespace remani_planner
     has_last_dynamic_replan_collision_ = false;
     dynamic_safety_speed_limit_active_ = false;
     dynamic_replan_retry_pending_ = false;
+    dynamic_event_fast_replan_attempted_ = false;
+    dynamic_event_astar_attempted_ = false;
     dynamic_event_replan_attempts_ = 0;
     have_controller_progress_ = false;
     tracking_fault_active_ = false;
@@ -333,33 +339,51 @@ namespace remani_planner
 
     case REPLAN_TRAJ:
     {
-      if (dynamic_replan_retry_pending_ &&
-          ros::Time::now() < next_dynamic_replan_retry_time_) {
-        goto force_return;
-      }
-      if(dynamic_replan_retry_pending_){
-        if(dynamic_event_replan_attempts_ >=
-           global_plan_dynamic_max_replans_per_event_){
+      if (dynamic_replan_retry_pending_) {
+        if (ros::Time::now() < next_dynamic_replan_retry_time_)
+          goto force_return;
+
+        if (dynamic_event_astar_attempted_ ||
+            dynamic_event_replan_attempts_ >=
+                global_plan_dynamic_max_replans_per_event_) {
           dynamic_replan_retry_pending_ = false;
+          applyDynamicSafetySpeedLimit(0.0);
           ROS_WARN_THROTTLE(
               1.0,
-              "[FSM] Dynamic event replan budget exhausted (%d); keep the "
-              "current speed limit and wait for the obstacle event to clear.",
+              "[FSM] Dynamic event replan budget exhausted (%d); pause the "
+              "colliding trajectory until the obstacle event clears.",
               dynamic_event_replan_attempts_);
           changeFSMExecState(EXEC_TRAJ, "DYNAMIC_EVENT_BUDGET");
           goto force_return;
         }
+
+        dynamic_event_astar_attempted_ = true;
         ++dynamic_event_replan_attempts_;
+        ROS_INFO("[FSM] Fast local repair failed; run the guaranteed A* "
+                 "topology fallback (%d/%d).",
+                 dynamic_event_replan_attempts_,
+                 global_plan_dynamic_max_replans_per_event_);
+        if (planFromLocalTraj(true, false)) {
+          replan_fail_time_ = 0;
+          dynamic_replan_retry_pending_ = false;
+          dynamic_replan_hold_until_ =
+              ros::Time::now() + ros::Duration(global_plan_dynamic_replan_hold_time_);
+          flag_relan_astar_ = false;
+          changeFSMExecState(EXEC_TRAJ, "DYNAMIC_ASTAR");
+        } else {
+          ++replan_fail_time_;
+          dynamic_replan_retry_pending_ = false;
+          applyDynamicSafetySpeedLimit(0.0);
+          ROS_ERROR("[FSM] Dynamic A* fallback failed; pause the old "
+                    "colliding trajectory instead of creeping toward the obstacle.");
+          changeFSMExecState(EXEC_TRAJ, "DYNAMIC_ASTAR_FAILED");
+        }
+        break;
       }
 
       if(planFromLocalTraj(flag_relan_astar_)){
         replan_fail_time_ = 0;
         flag_relan_astar_ = false;
-        if (dynamic_replan_retry_pending_) {
-          dynamic_replan_retry_pending_ = false;
-          dynamic_replan_hold_until_ =
-              ros::Time::now() + ros::Duration(global_plan_dynamic_replan_hold_time_);
-        }
         if((ros::Time::now() - t_last_Astar_ ).toSec() > 1.0){
           std::cout << "cal front end next time" << std::endl;
           flag_relan_astar_ = true;
@@ -371,13 +395,8 @@ namespace remani_planner
         replan_fail_time_++;
         flag_relan_astar_ = true;
         t_last_Astar_ = ros::Time::now();
-        if (dynamic_replan_retry_pending_) {
-          next_dynamic_replan_retry_time_ =
-              ros::Time::now() + ros::Duration(global_plan_dynamic_retry_interval_);
-        }
         if(replan_fail_time_ >= 20){
           replan_fail_time_ = 0;
-          dynamic_replan_retry_pending_ = false;
           ROS_ERROR("[FSM]:REPLAN fail over 20 times!!!");
           changeFSMExecState(WAIT_TARGET, "FSM");
         }
@@ -644,10 +663,26 @@ namespace remani_planner
     publishSafetySpeedLimit(limited_speed);
   }
 
+  void REMANIReplanFSM::resetDynamicReplanEvent()
+  {
+    dynamic_replan_retry_pending_ = false;
+    dynamic_event_fast_replan_attempted_ = false;
+    dynamic_event_astar_attempted_ = false;
+    dynamic_event_replan_attempts_ = 0;
+    dynamic_replan_hold_until_ = ros::Time(0);
+    next_dynamic_replan_retry_time_ = ros::Time(0);
+    last_dynamic_replan_collision_pos_.setZero();
+    last_dynamic_replan_collision_type_ = -1;
+    has_last_dynamic_replan_collision_ = false;
+  }
+
   void REMANIReplanFSM::clearDynamicSafetySpeedLimit(const ros::Time &now, bool force)
   {
-    if (!dynamic_safety_speed_limit_active_)
+    if (!dynamic_safety_speed_limit_active_) {
+      if (force)
+        resetDynamicReplanEvent();
       return;
+    }
     if (!force &&
         (exec_state_ == EMERGENCY_STOP || last_dynamic_seen_time_.isZero() ||
          (now - last_dynamic_seen_time_).toSec() < global_plan_dynamic_clear_hold_time_)) {
@@ -655,14 +690,11 @@ namespace remani_planner
     }
 
     dynamic_safety_speed_limit_active_ = false;
-    if (force)
-      dynamic_replan_retry_pending_ = false;
     dynamic_collision_confirm_count_ = 0;
-    dynamic_event_replan_attempts_ = 0;
     last_dynamic_collision_time_ = ros::Time(0);
     last_dynamic_seen_time_ = ros::Time(0);
     has_last_dynamic_confirmation_pos_ = false;
-    has_last_dynamic_replan_collision_ = false;
+    resetDynamicReplanEvent();
     publishSafetySpeedLimit(-1.0);
   }
 
@@ -968,6 +1000,14 @@ namespace remani_planner
       }
 
       if (collision_is_dynamic && has_last_dynamic_replan_collision_ &&
+          (dynamic_collision_position - last_dynamic_replan_collision_pos_).norm() >
+              global_plan_dynamic_same_obstacle_radius_) {
+        ROS_INFO("[FSM] Dynamic collision moved %.2f m; start a new local repair event.",
+                 (dynamic_collision_position - last_dynamic_replan_collision_pos_).norm());
+        resetDynamicReplanEvent();
+      }
+
+      if (collision_is_dynamic && has_last_dynamic_replan_collision_ &&
           last_dynamic_replan_collision_type_ == coll_type &&
           now < dynamic_replan_hold_until_) {
         ROS_INFO_THROTTLE(
@@ -977,22 +1017,33 @@ namespace remani_planner
             (dynamic_replan_hold_until_ - now).toSec());
         return;
       }
-      if(collision_is_dynamic &&
-         dynamic_event_replan_attempts_ >=
-             global_plan_dynamic_max_replans_per_event_){
+      if (collision_is_dynamic && dynamic_event_astar_attempted_) {
+        applyDynamicSafetySpeedLimit(0.0);
         ROS_WARN_THROTTLE(
             1.0,
-            "[FSM] Suppress repeated planning for the same continuous dynamic "
-            "event (%d/%d); slowdown/emergency monitoring remains active.",
-            dynamic_event_replan_attempts_,
-            global_plan_dynamic_max_replans_per_event_);
+            "[FSM] A* was already attempted for this dynamic event; keep the "
+            "known-colliding trajectory paused until the event clears.");
+        return;
+      }
+
+      if (collision_is_dynamic && dynamic_event_fast_replan_attempted_) {
+        dynamic_replan_retry_pending_ = true;
+        next_dynamic_replan_retry_time_ =
+            ros::Time::now() + ros::Duration(global_plan_dynamic_retry_interval_);
+        dynamic_replan_hold_until_ = next_dynamic_replan_retry_time_;
+        changeFSMExecState(REPLAN_TRAJ, "DYNAMIC_ASTAR_PENDING");
         return;
       }
 
       ROS_INFO("Try to replan a safe trajectory");
-      if(collision_is_dynamic)
+      if(collision_is_dynamic) {
+        dynamic_event_fast_replan_attempted_ = true;
         ++dynamic_event_replan_attempts_;
-      if (planFromLocalTraj(false, !collision_is_dynamic)){ // Make a chance
+      }
+      if (planFromLocalTraj(
+              false, !collision_is_dynamic,
+              collision_is_dynamic ?
+                  global_plan_dynamic_fast_replan_wall_time_ : -1.0)){ // Make a chance
         dynamic_collision_confirm_count_ = 0;
         last_dynamic_collision_time_ = ros::Time(0);
         if (collision_is_dynamic) {
@@ -1015,10 +1066,10 @@ namespace remani_planner
           has_last_dynamic_replan_collision_ = true;
           dynamic_replan_retry_pending_ = true;
           next_dynamic_replan_retry_time_ =
-              ros::Time::now() + ros::Duration(std::max(
-                  1.0, global_plan_dynamic_retry_interval_));
+              ros::Time::now() + ros::Duration(global_plan_dynamic_retry_interval_);
           dynamic_replan_hold_until_ = next_dynamic_replan_retry_time_;
-          ROS_WARN("[FSM] Fast dynamic replan failed; keep the speed limit and retry after %.2f s.",
+          ROS_WARN("[FSM] Fast dynamic replan failed; keep the old trajectory "
+                   "speed-limited and start A* after %.2f s.",
                    global_plan_dynamic_retry_interval_);
           changeFSMExecState(REPLAN_TRAJ, "SAFETY");
         }else{
@@ -1345,7 +1396,9 @@ namespace remani_planner
     return false;
   }
 
-  bool REMANIReplanFSM::planFromLocalTraj(bool flag_use_poly_init, bool allow_random_retry){
+  bool REMANIReplanFSM::planFromLocalTraj(bool flag_use_poly_init,
+                                          bool allow_random_retry,
+                                          double optimization_wall_time){
     SingulTrajData *info = &planner_manager_->traj_container_.singul_traj_data;
     const ros::Time now = ros::Time::now();
     const double t_now = getCurrentTrajectoryTime(*info, now);
@@ -1397,6 +1450,12 @@ namespace remani_planner
                arm_position_error.cwiseAbs().maxCoeff());
     }
 
+    const double original_wall_time =
+        planner_manager_->ploy_traj_opt_->getMaxWallTime();
+    if (optimization_wall_time > 0.0)
+      planner_manager_->ploy_traj_opt_->setMaxWallTime(
+          optimization_wall_time);
+
     bool success = callReboundReplan(flag_use_poly_init, false);
     if (!success && allow_random_retry){
       for (int i = 0; i < 1; i++){
@@ -1405,6 +1464,7 @@ namespace remani_planner
           break;
       }
     }
+    planner_manager_->ploy_traj_opt_->setMaxWallTime(original_wall_time);
 
     if (!success)
       return false;

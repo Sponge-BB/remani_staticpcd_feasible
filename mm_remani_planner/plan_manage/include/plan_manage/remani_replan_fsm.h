@@ -108,6 +108,7 @@ namespace remani_planner
     double global_plan_dynamic_replan_hold_time_;
     double global_plan_dynamic_same_obstacle_radius_;
     double global_plan_dynamic_retry_interval_;
+    double global_plan_dynamic_fast_replan_wall_time_;
     int global_plan_dynamic_max_replans_per_event_;
     double global_plan_dynamic_slowdown_distance_;
     double global_plan_dynamic_slowdown_min_speed_;
@@ -192,6 +193,8 @@ namespace remani_planner
     bool has_last_dynamic_replan_collision_;
     bool dynamic_safety_speed_limit_active_;
     bool dynamic_replan_retry_pending_;
+    bool dynamic_event_fast_replan_attempted_;
+    bool dynamic_event_astar_attempted_;
     bool have_controller_progress_;
     bool tracking_fault_active_;
     double controller_trajectory_start_time_;
@@ -210,7 +213,8 @@ namespace remani_planner
     bool callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj);           // front-end and back-end method
     bool callEmergencyStop(Eigen::VectorXd stop_pos, double stop_yaw, const int singul); // front-end and back-end method
     bool planFromGlobalTraj(const int trial_times = 1);
-    bool planFromLocalTraj(bool flag_use_poly_init, bool allow_random_retry = true);
+    bool planFromLocalTraj(bool flag_use_poly_init, bool allow_random_retry = true,
+                           double optimization_wall_time = -1.0);
     
     /* return value: std::pair< Times of the same state be continuously called, current continuously called state > */
     void changeFSMExecState(FSM_EXEC_STATE new_state, string pos_call);
@@ -223,6 +227,7 @@ namespace remani_planner
     void publishSafetySpeedLimit(double speed_limit);
     void applyDynamicSafetySpeedLimit(double speed_limit);
     void clearDynamicSafetySpeedLimit(const ros::Time &now, bool force = false);
+    void resetDynamicReplanEvent();
     double getCurrentTrajectoryTime(const SingulTrajData &traj, const ros::Time &now) const;
     double getCurrentTrajectoryScale(const SingulTrajData &traj, const ros::Time &now) const;
     bool validateStaticTrajectory(const SingulTrajData &traj, int &coll_type) const;

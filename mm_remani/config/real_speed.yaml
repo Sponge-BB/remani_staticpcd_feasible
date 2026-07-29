@@ -57,7 +57,9 @@ remani_planner_node:
     global_plan_dynamic_clear_hold_time: 0.80
     global_plan_dynamic_replan_hold_time: 3.00
     global_plan_dynamic_same_obstacle_radius: 0.45
-    global_plan_dynamic_retry_interval: 0.50
+    # First deform the old trajectory briefly, then enter A* without a long blind wait.
+    global_plan_dynamic_retry_interval: 0.10
+    global_plan_dynamic_fast_replan_wall_time: 0.60
     global_plan_dynamic_max_replans_per_event: 2
     # 障碍物进入空间前视后先连续限速，只有进入动态制动距离才急停。
     global_plan_dynamic_slowdown_distance: 2.0
