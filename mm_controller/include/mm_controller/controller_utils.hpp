@@ -11,6 +11,7 @@
 #include <nav_msgs/Odometry.h>
 #include <tf/transform_datatypes.h>
 #include <std_msgs/Bool.h>
+#include <cstdint>
 #include <deque>
 
 #include "traj_utils/poly_traj_utils.hpp"
@@ -37,11 +38,15 @@ public:
 	sensor_msgs::JointState joint_state_msg;
 	int mani_dof_;
 	ros::Time rcv_stamp;
+	ros::Time odom_rcv_stamp;
+	ros::Time joint_rcv_stamp;
 	bool have_car_;
 	bool have_mani_;
 
 	State_Data_t(){
 		rcv_stamp = ros::Time(0);
+		odom_rcv_stamp = ros::Time(0);
+		joint_rcv_stamp = ros::Time(0);
 		car_q.setIdentity();
 		have_car_ = false;
 		have_mani_ = false;
@@ -57,6 +62,7 @@ public:
 		have_car_ = true;
 		odom_msg = *pMsg;
 		rcv_stamp = ros::Time::now();
+		odom_rcv_stamp = rcv_stamp;
 
 		car_p(0) = odom_msg.pose.pose.position.x;
 		car_p(1) = odom_msg.pose.pose.position.y;
@@ -83,6 +89,7 @@ public:
 		have_mani_ = true;
 		joint_state_msg = *pMsg;
 		rcv_stamp = ros::Time::now();
+		joint_rcv_stamp = rcv_stamp;
 
 		for(int i = 0; i < mani_dof_; ++i){
 			// FIXME joint_state must be sent in specific order: 
@@ -111,14 +118,16 @@ public:
 	double total_traj_end_time;
 	ros::Time total_traj_start_time_ros;
 	ros::Time total_traj_end_time_ros;
-	int exec_traj = 0; // use for aborting the trajectory, 0 means no trajectory is executing  
-						// -1 means the trajectory is aborting, 1 means the trajectory is executing 
+	int exec_traj = 0; // 0: idle, -1: abort, 1: executing
+	std::uint64_t update_seq = 0;
+	ros::Time last_update_stamp;
 	// std::deque<oneTraj_Data_t> traj_queue;
 	remani_planner::SingulTrajData singul_traj_data;
 	
 	Trajectory_Data_t(){
 		total_traj_start_time_ros = ros::Time(0);
 		total_traj_end_time_ros = ros::Time(0);
+		last_update_stamp = ros::Time(0);
 		exec_traj = 0;
 	}
 

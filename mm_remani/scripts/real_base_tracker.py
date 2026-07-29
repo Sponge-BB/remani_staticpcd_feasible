@@ -5,7 +5,7 @@ import rospy
 import math
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Float64, Float64MultiArray
+from std_msgs.msg import Bool, Float64, Float64MultiArray
 
 class RealBaseTracker:
     def __init__(self):
@@ -14,6 +14,7 @@ class RealBaseTracker:
         # 1. 发布给实车底盘的速度控制指令
         self.cmd_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
         self.err_pub = rospy.Publisher('/tracking_error', Float64MultiArray, queue_size=10)
+        self.fault_pub = rospy.Publisher('/tracking_fault', Bool, queue_size=1, latch=True)
         self.safety_speed_limit = None
 
         # 2. 接收由 REMANI 规划器发出的期望轨迹点（包裹在 Twist 里）
@@ -34,6 +35,8 @@ class RealBaseTracker:
         self.current_y = 0.0
         self.current_yaw = 0.0
         self.has_odom = False
+        self.odom_receive_stamp = rospy.Time(0)
+        self.odom_header_stamp = rospy.Time(0)
 
         self.target_x = 0.0
         self.target_y = 0.0
@@ -57,6 +60,21 @@ class RealBaseTracker:
         self.max_angular_accel = max(0.01, rospy.get_param('~tracker_max_angular_accel', 1.0))
         self.allow_reverse = rospy.get_param('~allow_reverse', False)
         self.command_timeout = max(0.05, rospy.get_param('~command_timeout', 0.3))
+        self.odom_timeout = max(0.05, rospy.get_param('~odom_timeout', 0.25))
+        self.odom_header_timeout = max(
+            self.odom_timeout, rospy.get_param('~odom_header_timeout', 0.25))
+        self.tracking_stop_distance = max(
+            0.05, rospy.get_param('~tracking_stop_distance', 0.18))
+        self.tracking_stop_yaw = max(
+            0.1, rospy.get_param('~tracking_stop_yaw', 0.50))
+        self.tracking_recover_distance = min(
+            self.tracking_stop_distance,
+            max(0.02, rospy.get_param('~tracking_recover_distance', 0.08)))
+        self.tracking_recover_yaw = min(
+            self.tracking_stop_yaw,
+            max(0.05, rospy.get_param('~tracking_recover_yaw', 0.25)))
+        self.tracking_recover_frames = max(
+            1, int(rospy.get_param('~tracking_recover_frames', 5)))
         self.goal_position_tolerance = max(0.01, rospy.get_param('~goal_position_tolerance', 0.05))
         self.goal_yaw_tolerance = max(0.01, rospy.get_param('~goal_yaw_tolerance', 0.1))
         self.goal_speed_tolerance = max(0.0, rospy.get_param('~goal_speed_tolerance', 0.05))
@@ -65,9 +83,15 @@ class RealBaseTracker:
         self.local_reverse_max_lateral_error = max(0.01, rospy.get_param('~local_reverse_max_lateral_error', 0.08))
         self.local_reverse_max_yaw_error = max(0.01, rospy.get_param('~local_reverse_max_yaw_error', 0.35))
         self.local_reverse_max_speed = max(0.01, rospy.get_param('~local_reverse_max_speed', 0.08))
+        self.local_reverse_max_travel = max(
+            0.05, rospy.get_param('~local_reverse_max_travel', 0.70))
         self.target_stamp = rospy.Time(0)
         self.last_cmd = Twist()
         self.last_control_stamp = rospy.Time(0)
+        self.reverse_motion_origin = None
+        self.tracking_fault = False
+        self.tracking_recover_count = 0
+        self.fault_pub.publish(Bool(data=False))
         rospy.on_shutdown(self.publish_stop)
 
         # 控制循环频率 (50ms = 20Hz)
@@ -83,6 +107,8 @@ class RealBaseTracker:
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         self.current_yaw = math.atan2(siny_cosp, cosy_cosp)
         self.has_odom = True
+        self.odom_receive_stamp = rospy.Time.now()
+        self.odom_header_stamp = msg.header.stamp
 
     def car_cmd_cb(self, msg):
         self.target_x = msg.linear.x
@@ -105,6 +131,17 @@ class RealBaseTracker:
         self.last_control_stamp = rospy.Time.now()
         self.cmd_pub.publish(self.last_cmd)
 
+    def set_tracking_fault(self, active, reason=""):
+        if active == self.tracking_fault:
+            return
+        self.tracking_fault = active
+        self.tracking_recover_count = 0
+        self.fault_pub.publish(Bool(data=active))
+        if active:
+            rospy.logerr("Tracking safety stop: %s", reason)
+        else:
+            rospy.loginfo("Tracking recovered on a trajectory aligned with current odometry")
+
     def normalize_angle(self, angle):
         while angle > math.pi:
             angle -= 2.0 * math.pi
@@ -122,12 +159,25 @@ class RealBaseTracker:
             self.publish_stop()
             return
 
-        if (rospy.Time.now() - self.target_stamp).to_sec() > self.command_timeout:
+        now = rospy.Time.now()
+        odom_receive_age = (now - self.odom_receive_stamp).to_sec()
+        odom_header_age = (
+            (now - self.odom_header_stamp).to_sec()
+            if not self.odom_header_stamp.is_zero() else 0.0)
+        if (odom_receive_age > self.odom_timeout or
+                odom_header_age > self.odom_header_timeout):
+            self.set_tracking_fault(
+                True,
+                "odom stale (receive %.3fs, header %.3fs)" %
+                (odom_receive_age, odom_header_age))
+            self.publish_stop()
+            return
+
+        if (now - self.target_stamp).to_sec() > self.command_timeout:
             rospy.logwarn_throttle(1.0, "Trajectory command timed out; stopping base")
             self.publish_stop()
             return
 
-        now = rospy.Time.now()
         if self.last_control_stamp.is_zero():
             dt = 0.05
         else:
@@ -147,14 +197,38 @@ class RealBaseTracker:
         eyaw = self.normalize_angle(self.target_yaw - self.current_yaw)
 
         dist = math.hypot(ex_global, ey_global)
+        err_msg = Float64MultiArray()
+        err_msg.data = [dist, ex, ey, eyaw]
+        self.err_pub.publish(err_msg)
+
+        # A severely displaced robot must not cut across the optimized path to
+        # chase a future reference point. The planner receives this latched
+        # fault and generates a replacement trajectory from measured odometry.
+        if self.tracking_fault:
+            if (dist <= self.tracking_recover_distance and
+                    abs(eyaw) <= self.tracking_recover_yaw):
+                self.tracking_recover_count += 1
+                if self.tracking_recover_count >= self.tracking_recover_frames:
+                    self.set_tracking_fault(False)
+            else:
+                self.tracking_recover_count = 0
+            if self.tracking_fault:
+                self.publish_stop()
+                return
+        elif (dist > self.tracking_stop_distance or
+              abs(eyaw) > self.tracking_stop_yaw):
+            self.set_tracking_fault(
+                True,
+                "reference error %.3fm / %.3frad exceeds %.3fm / %.3frad" %
+                (dist, abs(eyaw), self.tracking_stop_distance,
+                 self.tracking_stop_yaw))
+            self.publish_stop()
+            return
 
         # 如果已经非常接近终点，直接刹车停稳
         if (dist < self.goal_position_tolerance and
                 abs(eyaw) < self.goal_yaw_tolerance and
                 abs(v_r) < self.goal_speed_tolerance):
-            err_msg = Float64MultiArray()
-            err_msg.data = [dist, ex, ey, eyaw]
-            self.err_pub.publish(err_msg)
             self.publish_stop()
             return
 
@@ -166,11 +240,6 @@ class RealBaseTracker:
         cmd.linear.x = v_r * math.cos(eyaw) + self.k_x * ex
         cmd.angular.z = self.target_w + self.k_yaw * eyaw + self.k_y * v_r * ey
 
-        # 发布诊断数据
-        err_msg = Float64MultiArray()
-        err_msg.data = [dist, ex, ey, eyaw]
-        self.err_pub.publish(err_msg)
-
         # 安全限幅
         if cmd.linear.x > self.max_v:  cmd.linear.x = self.max_v
         if cmd.linear.x < -self.max_v: cmd.linear.x = -self.max_v
@@ -180,12 +249,17 @@ class RealBaseTracker:
         # Keep normal motion forward-only. A small reverse command is allowed only
         # to recover a nearby handoff error; planned long reverse segments stay blocked.
         if not self.allow_reverse and cmd.linear.x < 0.0:
+            if self.reverse_motion_origin is None:
+                self.reverse_motion_origin = (self.current_x, self.current_y)
+            reverse_travel = math.hypot(
+                self.current_x - self.reverse_motion_origin[0],
+                self.current_y - self.reverse_motion_origin[1])
             local_reverse_ok = (
                 self.local_reverse_recovery and
-                v_r >= -self.goal_speed_tolerance and
                 -self.local_reverse_max_distance <= ex < 0.0 and
                 abs(ey) <= self.local_reverse_max_lateral_error and
-                abs(eyaw) <= self.local_reverse_max_yaw_error
+                abs(eyaw) <= self.local_reverse_max_yaw_error and
+                reverse_travel <= self.local_reverse_max_travel
             )
             if local_reverse_ok:
                 cmd.linear.x = max(cmd.linear.x, -self.local_reverse_max_speed)
@@ -193,10 +267,16 @@ class RealBaseTracker:
             else:
                 rospy.logwarn_throttle(1.0, "Blocked non-local reverse cmd_vel request")
                 cmd.linear.x = 0.0
+        elif cmd.linear.x >= 0.0:
+            self.reverse_motion_origin = None
 
         if self.safety_speed_limit is not None:
-            cmd.linear.x = max(-self.safety_speed_limit,
-                               min(self.safety_speed_limit, cmd.linear.x))
+            if self.safety_speed_limit <= 1e-3:
+                self.publish_stop()
+                return
+            else:
+                cmd.linear.x = max(-self.safety_speed_limit,
+                                   min(self.safety_speed_limit, cmd.linear.x))
 
         # Keep trajectory handoffs physically smooth. The polynomial trajectory
         # already respects planning limits; this only bounds tracker corrections.

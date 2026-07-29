@@ -35,6 +35,9 @@
     <param name="lidar_offset_x" value="0.28" />
     <param name="lidar_offset_y" value="0.0" />
     <param name="lidar_offset_z" value="0.002" />
+    <param name="twist_filter_alpha" value="0.35" />
+    <param name="max_derived_linear_speed" value="1.0" />
+    <param name="max_derived_angular_speed" value="3.0" />
   </node>
 
   <!-- 3. ICP localization (corrects odometry drift) -->

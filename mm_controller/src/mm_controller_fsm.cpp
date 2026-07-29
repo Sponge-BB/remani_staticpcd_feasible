@@ -10,11 +10,25 @@ MMControllerFSM::MMControllerFSM(const ros::NodeHandle& nh) : nh_(nh){
 	nh_.param("controller/curvature_ff_start_speed", curvature_ff_start_speed_, 0.04);
 	nh_.param("controller/curvature_ff_full_speed", curvature_ff_full_speed_, 0.10);
 	nh_.param("controller/max_feedforward_omega", max_feedforward_omega_, 0.60);
+	nh_.param("controller/odom_timeout", odom_timeout_, 0.25);
+	nh_.param("controller/virtual_time_min_reference_speed", virtual_time_min_reference_speed_, 0.05);
+	nh_.param("controller/virtual_time_scale_rise_rate", virtual_time_scale_rise_rate_, 0.8);
+	nh_.param("controller/virtual_time_scale_fall_rate", virtual_time_scale_fall_rate_, 2.0);
 	yaw_hold_speed_ = std::max(0.0, yaw_hold_speed_);
 	curvature_ff_start_speed_ = std::max(0.0, curvature_ff_start_speed_);
 	curvature_ff_full_speed_ = std::max(curvature_ff_start_speed_ + 1e-3,
 	                                    curvature_ff_full_speed_);
 	max_feedforward_omega_ = std::max(0.0, max_feedforward_omega_);
+	odom_timeout_ = std::max(0.05, odom_timeout_);
+	virtual_time_min_reference_speed_ = std::max(0.01, virtual_time_min_reference_speed_);
+	virtual_time_scale_rise_rate_ = std::max(0.01, virtual_time_scale_rise_rate_);
+	virtual_time_scale_fall_rate_ = std::max(0.01, virtual_time_scale_fall_rate_);
+	safety_speed_limit_ = -1.0;
+	virtual_traj_time_ = 0.0;
+	virtual_time_scale_ = 1.0;
+	active_trajectory_seq_ = 0;
+	last_virtual_clock_stamp_ = ros::Time(0);
+	trajectory_activation_stamp_ = ros::Time(0);
 
 	std::vector<double> init_state;
     nh.getParam("fsm/init_state", init_state);
@@ -32,6 +46,7 @@ MMControllerFSM::MMControllerFSM(const ros::NodeHandle& nh) : nh_(nh){
 	mani_cmd_pub_ = nh_.advertise<control_msgs::JointTrajectoryControllerState>("joint_cmd", 10);
 	gripper_cmd_pub_ = nh_.advertise<std_msgs::Bool>("gripper_cmd", 10);
     traj_start_trigger_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("/traj_start_trigger", 10);
+	trajectory_progress_pub_ = nh_.advertise<geometry_msgs::Vector3Stamped>("trajectory_progress", 1);
 
 	state_data.setParam(manipulator_dof_);
 	fsm_state_ = AUTO_STAY;
@@ -66,6 +81,7 @@ void MMControllerFSM::process(){
 	// return;
 	ros::Time now_time = ros::Time::now();
 	if(!state_data.have_car_ || !state_data.have_mani_) return;
+	syncTrajectoryClock(now_time);
 
 	static bool is_first_time = true;
 	if(is_first_time){
@@ -109,6 +125,7 @@ void MMControllerFSM::process(){
 	
 	if (fsm_state_ == AUTO_STAY || fsm_state_ == CMD_CTRL){
 		publish_ctrl_cmd(now_time);
+		publishTrajectoryProgress(now_time);
 	}
 }
 /* 
@@ -132,21 +149,21 @@ void MMControllerFSM::process(){
 void MMControllerFSM::CMD_CTRL_process()
 {
 	ros::Time now_time = ros::Time::now();
+	advanceTrajectoryClock(now_time);
 	switch (exec_traj_state_){
 		case STAY:
 		{
-			if(now_time.toSec() >= trajectory_data.total_traj_start_time &&
-			 now_time.toSec() <= trajectory_data.total_traj_end_time && 
-			 trajectory_data.exec_traj == 1 && (!trajectory_data.singul_traj_data.singul_traj.empty())){
-				// same as the below
+			if(trajectory_data.exec_traj == 1 &&
+			   !trajectory_data.singul_traj_data.singul_traj.empty() &&
+			   now_time >= trajectory_activation_stamp_){
 				update_stay_state(false);
-				double traj_time = now_time.toSec() - trajectory_data.total_traj_start_time;
-
-				cal_traj_ctrl_input(traj_time);
+				cal_traj_ctrl_input(virtual_traj_time_);
 
 				exec_traj_state_ = POLY_TRAJ;
 				ROS_INFO("[MMctrl] Receive the trajectory. STAY --> POLY_TRAJ");
 			}else{
+				if(now_time < trajectory_activation_stamp_)
+					update_stay_state(false);
 				cal_stay_ctrl_input();
 			}
 			break;
@@ -155,9 +172,12 @@ void MMControllerFSM::CMD_CTRL_process()
 		
 		case POLY_TRAJ:
 		{
-			if(now_time.toSec() < (trajectory_data.total_traj_start_time) 
-			|| now_time.toSec() > trajectory_data.total_traj_end_time 
-			|| trajectory_data.exec_traj != 1 || trajectory_data.singul_traj_data.singul_traj.empty()){
+			const bool trajectory_finished =
+				!trajectory_data.singul_traj_data.singul_traj.empty() &&
+				virtual_traj_time_ >= trajectory_data.singul_traj_data.duration - 1e-6;
+			if(trajectory_data.exec_traj != 1 ||
+			   trajectory_data.singul_traj_data.singul_traj.empty() ||
+			   trajectory_finished){
 				if(trajectory_data.exec_traj != -1){
 					// tracking the end point of the trajectory
 					// the hover pose is the end point of the trajectory
@@ -173,15 +193,13 @@ void MMControllerFSM::CMD_CTRL_process()
 				ROS_INFO("[MMctrl] Stop execute the trajectory. POLY_TRAJ --> STAY");
 				trajectory_data.exec_traj = 0;
 			}else{
-				update_stay_state(false);
-				if(now_time.toSec() < (trajectory_data.singul_traj_data.singul_traj.front().start_time)){
-					// the start time of first trajectory should be whole trajectory start time
-					trajectory_data.total_traj_start_time = trajectory_data.singul_traj_data.singul_traj.front().start_time;
+				if(now_time < trajectory_activation_stamp_){
+					update_stay_state(false);
 					cal_stay_ctrl_input();
-				}else{
-					double traj_time = now_time.toSec() - trajectory_data.singul_traj_data.start_time;
-					cal_traj_ctrl_input(traj_time);
+					break;
 				}
+				update_stay_state(false);
+				cal_traj_ctrl_input(virtual_traj_time_);
 			}
 			break;
 		}
@@ -207,7 +225,104 @@ void MMControllerFSM::update_stay_state(bool mani_goto_init){
 }
 
 bool MMControllerFSM::state_is_received(const ros::Time &now_time){
-	return (now_time - state_data.rcv_stamp).toSec() < 0.1;
+	return (now_time - state_data.odom_rcv_stamp).toSec() < odom_timeout_ &&
+	       (now_time - state_data.joint_rcv_stamp).toSec() < odom_timeout_;
+}
+
+void MMControllerFSM::safetySpeedLimitCallback(const std_msgs::Float64::ConstPtr &msg){
+	if(!std::isfinite(msg->data) || msg->data < 0.0)
+		safety_speed_limit_ = -1.0;
+	else
+		safety_speed_limit_ = std::max(0.0, msg->data);
+}
+
+void MMControllerFSM::syncTrajectoryClock(const ros::Time &now){
+	if(active_trajectory_seq_ == trajectory_data.update_seq)
+		return;
+
+	active_trajectory_seq_ = trajectory_data.update_seq;
+	virtual_traj_time_ = 0.0;
+	virtual_time_scale_ = trajectory_data.exec_traj == 1 ? 1.0 : 0.0;
+	last_virtual_clock_stamp_ = now;
+	trajectory_activation_stamp_ = now;
+	if(trajectory_data.exec_traj == 1 &&
+	   !trajectory_data.singul_traj_data.start_time_ros.isZero() &&
+	   trajectory_data.singul_traj_data.start_time_ros > now)
+		trajectory_activation_stamp_ =
+			trajectory_data.singul_traj_data.start_time_ros;
+	ROS_INFO("[MMctrl] Reset virtual trajectory clock for update %lu.",
+	         static_cast<unsigned long>(active_trajectory_seq_));
+}
+
+void MMControllerFSM::advanceTrajectoryClock(const ros::Time &now){
+	if(last_virtual_clock_stamp_.isZero()){
+		last_virtual_clock_stamp_ = now;
+		return;
+	}
+
+	const double dt = std::max(
+		0.0, std::min(0.1, (now - last_virtual_clock_stamp_).toSec()));
+	last_virtual_clock_stamp_ = now;
+	if(trajectory_data.exec_traj != 1 ||
+	   trajectory_data.singul_traj_data.singul_traj.empty())
+		return;
+	if(now < trajectory_activation_stamp_)
+		return;
+
+	double target_scale = 1.0;
+	const bool odom_fresh =
+		!state_data.odom_rcv_stamp.isZero() &&
+		(now - state_data.odom_rcv_stamp).toSec() <= odom_timeout_;
+	if(!odom_fresh){
+		target_scale = 0.0;
+		ROS_ERROR_THROTTLE(1.0, "[MMctrl] Odom stale; freezing trajectory clock.");
+	}else if(safety_speed_limit_ >= 0.0){
+		const double sample_time = std::min(
+			virtual_traj_time_, trajectory_data.singul_traj_data.duration);
+		const Eigen::VectorXd reference_velocity =
+			trajectory_data.singul_traj_data.getVel(sample_time);
+		const double reference_speed =
+			reference_velocity.head(mobile_base_dof_).norm();
+		target_scale = safety_speed_limit_ <= 1e-3
+			? 0.0
+			: std::min(
+				1.0, safety_speed_limit_ /
+					std::max(reference_speed, virtual_time_min_reference_speed_));
+	}
+
+	if(target_scale <= 1e-6){
+		virtual_time_scale_ = 0.0;
+	}else{
+		const double rate = target_scale > virtual_time_scale_
+			? virtual_time_scale_rise_rate_
+			: virtual_time_scale_fall_rate_;
+		const double max_change = rate * dt;
+		virtual_time_scale_ = std::max(
+			virtual_time_scale_ - max_change,
+			std::min(virtual_time_scale_ + max_change, target_scale));
+	}
+
+	virtual_traj_time_ = std::min(
+		trajectory_data.singul_traj_data.duration,
+		virtual_traj_time_ + dt * virtual_time_scale_);
+}
+
+void MMControllerFSM::publishTrajectoryProgress(const ros::Time &stamp){
+	geometry_msgs::Vector3Stamped msg;
+	msg.header.stamp = stamp;
+	msg.header.frame_id = "trajectory_progress";
+	if(!trajectory_data.singul_traj_data.singul_traj.empty()){
+		msg.vector.x = trajectory_data.singul_traj_data.start_time;
+		msg.vector.y = virtual_traj_time_;
+		msg.vector.z =
+			trajectory_data.exec_traj == 1 && stamp >= trajectory_activation_stamp_
+				? virtual_time_scale_ : 0.0;
+	}else{
+		msg.vector.x = 0.0;
+		msg.vector.y = 0.0;
+		msg.vector.z = 0.0;
+	}
+	trajectory_progress_pub_.publish(msg);
 }
 
 void MMControllerFSM::publish_ctrl_cmd(const ros::Time &stamp){
@@ -249,6 +364,9 @@ void MMControllerFSM::cal_traj_ctrl_input(double duration){
 	Eigen::VectorXd pos = trajectory_data.singul_traj_data.getPos(duration);
 	Eigen::VectorXd vel = trajectory_data.singul_traj_data.getVel(duration);
 	Eigen::VectorXd acc = trajectory_data.singul_traj_data.getAcc(duration);
+	const double time_scale = std::max(0.0, std::min(1.0, virtual_time_scale_));
+	vel *= time_scale;
+	acc *= time_scale * time_scale;
 
 	// true value
 	cmd_data.car_true_cmd.resize(5);

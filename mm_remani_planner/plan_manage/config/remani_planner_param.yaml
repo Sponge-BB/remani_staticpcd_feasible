@@ -24,10 +24,13 @@ search:
   search_vis_stride : 1      # Publish one marker point every N expanded nodes
   search_vis_max_points: 3000 # Cap RViz search markers to avoid heavy debug load
   search_vis_publish_interval: 50 # Refresh RViz after this many recorded nodes
-  # Rear distant goals directly use forward-only search, avoiding a discarded
-  # all-reverse Reeds-Shepp solution followed by a second full search.
+  # Rear distant goals may reverse briefly to create turning room, then must
+  # switch to forward travel instead of following a long blind reverse route.
   rear_goal_forward_only_distance: 0.50
   rear_goal_forward_only_cos: -0.20
+  rear_goal_max_reverse_distance: 0.65
+  rear_goal_reverse_activation_forward_distance: 0.15
+  rear_goal_max_gear_switches: 1
 
   # manipulator sample
   goal_rate: 0.4             # Probability for RRT to sample the end point
@@ -43,6 +46,10 @@ controller:
   curvature_ff_start_speed: 0.04
   curvature_ff_full_speed: 0.10
   max_feedforward_omega: 0.60
+  odom_timeout: 0.25
+  virtual_time_min_reference_speed: 0.05
+  virtual_time_scale_rise_rate: 0.80
+  virtual_time_scale_fall_rate: 2.00
 
 optimization:
   weight_obstacle          : 50000.0  # Weight for obstacle
@@ -93,8 +100,13 @@ fsm:
   global_plan_dynamic_emergency_margin: 0.05
   global_plan_dynamic_emergency_min_distance: 0.15
   global_plan_dynamic_emergency_max_distance: 0.22
+  controller_progress_timeout: 0.50
   global_plan_trial_times: 5  # Attempts per global planning cycle before yielding callbacks
   global_plan_max_failures: 5 # Give up an unreachable manual goal after this many failed cycles
+  rear_goal_plan_trial_times: 3
+  rear_goal_plan_max_failures: 3
+  rear_goal_plan_distance: 0.50
+  rear_goal_plan_cos: -0.20
   planning_horizon: 5.0       # Planning horizon (恢复为5.0，依靠前端A*作长距离导航)
   global_plan: true           # Whether to use global plan
   emergency_time: 1.5         # greater than max replan time

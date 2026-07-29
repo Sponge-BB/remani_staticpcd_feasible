@@ -46,9 +46,9 @@ remani_planner_node:
     global_plan_dynamic_confirm_timeout: 0.60
     # 短暂漏检时保持限速；新轨迹发布后只抑制同一位置的重复事件。
     global_plan_dynamic_clear_hold_time: 0.40
-    global_plan_dynamic_replan_hold_time: 0.60
+    global_plan_dynamic_replan_hold_time: 1.00
     global_plan_dynamic_same_obstacle_radius: 0.45
-    global_plan_dynamic_retry_interval: 0.30
+    global_plan_dynamic_retry_interval: 0.50
     # 障碍物进入空间前视后先连续限速，只有进入动态制动距离才急停。
     global_plan_dynamic_slowdown_distance: 2.0
     global_plan_dynamic_slowdown_min_speed: 0.08
@@ -58,6 +58,13 @@ remani_planner_node:
     global_plan_dynamic_emergency_margin: 0.05
     global_plan_dynamic_emergency_min_distance: 0.15
     global_plan_dynamic_emergency_max_distance: 0.22
+    # 规划器按控制器实际执行进度检查轨迹，限速时不再沿墙上时间超前。
+    controller_progress_timeout: 0.50
+    # 只限制后方远点的重复尝试；普通静态目标继续使用原有重试预算。
+    rear_goal_plan_trial_times: 3
+    rear_goal_plan_max_failures: 3
+    rear_goal_plan_distance: 0.50
+    rear_goal_plan_cos: -0.20
     # 手动 2D 导航主轨迹保持当前机械臂姿态；避障结束后再原地恢复待机位。
     manual_target_end_arm_standby: false
     manual_restore_standby_after_goal: true
@@ -74,6 +81,9 @@ remani_planner_node:
     require_forward_segment: true
     rear_goal_forward_only_distance: 0.50
     rear_goal_forward_only_cos: -0.20
+    rear_goal_max_reverse_distance: 0.65
+    rear_goal_reverse_activation_forward_distance: 0.15
+    rear_goal_max_gear_switches: 1
     # 桥下等场景给机械臂采样更多预算，避免找到底盘路线后机械臂无解。
     max_mani_search_time: 0.12
     # 将关节余量纳入段时间分配，保证桥下避障动作能在底盘到达前完成。
@@ -118,6 +128,14 @@ real_base_tracker:
   allow_reverse: false
   # 规划器或控制器停止发布后，超时自动发布零速度。
   command_timeout: 0.30
+  # 定位过期或实际轨迹偏差严重时才停车，普通滚动重规划不会触发。
+  odom_timeout: 0.25
+  odom_header_timeout: 0.25
+  tracking_stop_distance: 0.18
+  tracking_stop_yaw: 0.50
+  tracking_recover_distance: 0.08
+  tracking_recover_yaw: 0.25
+  tracking_recover_frames: 5
   # 静止轨迹终点必须进入此范围才停车，避免在目标外 0.15m 提前结束。
   goal_position_tolerance: 0.05
   goal_yaw_tolerance: 0.10
@@ -128,3 +146,4 @@ real_base_tracker:
   local_reverse_max_lateral_error: 0.08
   local_reverse_max_yaw_error: 0.35
   local_reverse_max_speed: 0.08
+  local_reverse_max_travel: 0.70

@@ -28,6 +28,13 @@ int main(int argc, char **argv){
                                                       ros::VoidConstPtr(),
                                                       ros::TransportHints().tcpNoDelay());
 
+    ros::Subscriber safety_speed_sub =
+        nh.subscribe<std_msgs::Float64>("/planning/safety_speed_limit",
+                                       1,
+                                       &MMController::MMControllerFSM::safetySpeedLimitCallback,
+                                       &fsm,
+                                       ros::TransportHints().tcpNoDelay());
+
     ros::Duration(0.5).sleep();
 
     ros::Rate r(100);
@@ -39,4 +46,3 @@ int main(int argc, char **argv){
 
     return 0;
 }
-

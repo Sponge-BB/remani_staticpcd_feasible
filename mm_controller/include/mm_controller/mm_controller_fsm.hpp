@@ -5,8 +5,10 @@
 #include <ros/assert.h>
 
 #include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/Vector3Stamped.h>
 #include <nav_msgs/Odometry.h>
 #include <std_msgs/Empty.h>
+#include <std_msgs/Float64.h>
 #include "mm_controller/controller_utils.hpp"
 #include "mm_controller/polynomial_trajectory.h"
 
@@ -42,10 +44,11 @@ public:
 	void process();
 	void CMD_CTRL_process();
 	bool state_is_received(const ros::Time &now_time);
+	void safetySpeedLimitCallback(const std_msgs::Float64::ConstPtr &msg);
 
 private:
 	int mobile_base_dof_, manipulator_dof_;
-	ros::Publisher traj_start_trigger_pub_;
+	ros::Publisher traj_start_trigger_pub_, trajectory_progress_pub_;
 	ros::Publisher car_cmd_pub_, mani_cmd_pub_, gripper_cmd_pub_;
 	State_t fsm_state_; // Should only be changed in PX4CtrlFSM::process() function!
 	Exec_Traj_State_t exec_traj_state_;
@@ -60,6 +63,16 @@ private:
 	double curvature_ff_start_speed_;
 	double curvature_ff_full_speed_;
 	double max_feedforward_omega_;
+	double odom_timeout_;
+	double virtual_time_min_reference_speed_;
+	double virtual_time_scale_rise_rate_;
+	double virtual_time_scale_fall_rate_;
+	double safety_speed_limit_;
+	double virtual_traj_time_;
+	double virtual_time_scale_;
+	std::uint64_t active_trajectory_seq_;
+	ros::Time last_virtual_clock_stamp_;
+	ros::Time trajectory_activation_stamp_;
 
 	// Handles
 	ros::NodeHandle nh_;
@@ -67,6 +80,9 @@ private:
 	void publish_ctrl_cmd(const ros::Time &stamp);
 	void update_stay_state(bool mani_goto_init);
 	void publish_trigger(const nav_msgs::Odometry &odom_msg);
+	void syncTrajectoryClock(const ros::Time &now);
+	void advanceTrajectoryClock(const ros::Time &now);
+	void publishTrajectoryProgress(const ros::Time &stamp);
 	void cal_traj_ctrl_input(double duration);
 	void cal_stay_ctrl_input();
 	void limitErr(Eigen::VectorXd &x, const double x_low, const double x_upp);

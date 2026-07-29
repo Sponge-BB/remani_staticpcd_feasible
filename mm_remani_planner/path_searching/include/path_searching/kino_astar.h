@@ -45,6 +45,9 @@ public:
   PathNode* parent;
   char node_state;
   int singul = 0;
+  double reverse_distance = 0.0;
+  double forward_distance = 0.0;
+  int gear_switches = 0;
   /* -------------------- */
   PathNode() {
     parent = NULL;
@@ -123,6 +126,10 @@ class KinoAstar{
     bool require_forward_segment_;
     double rear_goal_forward_only_distance_;
     double rear_goal_forward_only_cos_;
+    double rear_goal_max_reverse_distance_;
+    double rear_goal_reverse_activation_forward_distance_;
+    int rear_goal_max_gear_switches_;
+    bool bounded_reverse_mode_;
     
     double oneshot_check_len_;
     double grid_interval_;
@@ -206,7 +213,7 @@ class KinoAstar{
     double normalize_angle(const double &angle);
     inline int getSingularity(const double &vel);
     inline double getHeu(const Eigen::Vector3d &x1, const Eigen::Vector3d &x2);
-    bool is_shot_sucess(const Eigen::Vector3d &state1, const Eigen::Vector3d &state2, int last_dir);
+    bool is_shot_sucess(const PathNodePtr &start_node, const Eigen::Vector3d &state2);
     double computeShotTraj(const Eigen::Vector3d &state1, const Eigen::Vector3d &state2,const int shotptrind,
                            std::vector<Eigen::Vector3d> &path_list,
                            double& len);

@@ -16,6 +16,8 @@ void Trajectory_Data_t::feed(quadrotor_msgs::PolynomialTrajConstPtr pMsg){
             singul_traj_data.start_time = pMsg->header.stamp.toSec();
             total_traj_start_time_ros = ros::Time::now();
             total_traj_start_time = ros::Time::now().toSec();
+            last_update_stamp = ros::Time::now();
+            ++update_seq;
         }
         
         poly_traj::Trajectory<7> polyTraj;
@@ -34,6 +36,8 @@ void Trajectory_Data_t::feed(quadrotor_msgs::PolynomialTrajConstPtr pMsg){
         singul_traj_data.clearSingulTraj();
         total_traj_start_time = 0.0;
         total_traj_end_time = 0.0;
+        last_update_stamp = ros::Time::now();
+        ++update_seq;
         exec_traj = -1;
     }else if (traj.action == quadrotor_msgs::PolynomialTraj::ACTION_WARN_IMPOSSIBLE){
         total_traj_start_time_ros = ros::Time(0);
@@ -41,6 +45,8 @@ void Trajectory_Data_t::feed(quadrotor_msgs::PolynomialTrajConstPtr pMsg){
         total_traj_start_time = 0.0;
         total_traj_end_time = 0.0;
         singul_traj_data.clearSingulTraj();
+        last_update_stamp = ros::Time::now();
+        ++update_seq;
         exec_traj = -1;
     }
 }

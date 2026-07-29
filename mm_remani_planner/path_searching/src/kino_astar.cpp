@@ -36,6 +36,10 @@ void KinoAstar::setParam(ros::NodeHandle& nh, const std::shared_ptr<GridMap> &en
   nh.param("search/require_forward_segment", require_forward_segment_, true);
   nh.param("search/rear_goal_forward_only_distance", rear_goal_forward_only_distance_, 0.5);
   nh.param("search/rear_goal_forward_only_cos", rear_goal_forward_only_cos_, -0.2);
+  nh.param("search/rear_goal_max_reverse_distance", rear_goal_max_reverse_distance_, 0.65);
+  nh.param("search/rear_goal_reverse_activation_forward_distance",
+           rear_goal_reverse_activation_forward_distance_, 0.15);
+  nh.param("search/rear_goal_max_gear_switches", rear_goal_max_gear_switches_, 1);
   nh.param("search/max_arc", max_arc_, 0.9);
   nh.param("search/oneshot_check_len", oneshot_check_len_, 0.2);
   
@@ -60,6 +64,11 @@ void KinoAstar::setParam(ros::NodeHandle& nh, const std::shared_ptr<GridMap> &en
   search_vis_publish_interval_ = std::max(1, search_vis_publish_interval_);
   rear_goal_forward_only_distance_ = std::max(0.0, rear_goal_forward_only_distance_);
   rear_goal_forward_only_cos_ = std::max(-1.0, std::min(1.0, rear_goal_forward_only_cos_));
+  rear_goal_max_reverse_distance_ = std::max(0.0, rear_goal_max_reverse_distance_);
+  rear_goal_reverse_activation_forward_distance_ =
+      std::max(0.0, rear_goal_reverse_activation_forward_distance_);
+  rear_goal_max_gear_switches_ = std::max(0, rear_goal_max_gear_switches_);
+  bounded_reverse_mode_ = false;
   nh.param("fsm/planning_horizon", planning_horizon_, 10.0);
 
   bool global_plan;
@@ -161,9 +170,8 @@ int KinoAstar::KinoAstarSearchAndGetSimplePath(const Eigen::VectorXd &start_pos,
   end_state(3) = 0.0;
   end_state.tail(manipulator_dof_) = end_pos.tail(manipulator_dof_);
 
-  // A far goal behind the current heading would first produce an all-reverse
-  // Reeds-Shepp solution, which is rejected later by require_forward_segment_.
-  // Search the executable forward-only model directly and avoid that full retry.
+  // Rear goals may use a short reverse setup, but the search budget below
+  // prevents a long blind reverse route.
   const Eigen::Vector2d goal_offset = end_state.head(2) - start_state.head(2);
   const double goal_distance = goal_offset.norm();
   const Eigen::Vector2d heading(cos(start_yaw), sin(start_yaw));
@@ -171,10 +179,11 @@ int KinoAstar::KinoAstarSearchAndGetSimplePath(const Eigen::VectorXd &start_pos,
       goal_distance >= rear_goal_forward_only_distance_ && goal_distance > 1e-6 &&
       heading.dot(goal_offset / goal_distance) <= rear_goal_forward_only_cos_;
   const bool configured_allow_reverse = allow_reverse_;
-  const bool force_forward_only = configured_allow_reverse && require_forward_segment_ && rear_far_goal;
-  if (force_forward_only) {
-    ROS_INFO("[kino astar] rear distant goal: searching forward-only directly.");
-    configureMotionModel(false);
+  bounded_reverse_mode_ =
+      configured_allow_reverse && require_forward_segment_ && rear_far_goal;
+  if (bounded_reverse_mode_) {
+    ROS_INFO("[kino astar] rear distant goal: allow up to %.2f m local reverse and %d gear switch.",
+             rear_goal_max_reverse_distance_, rear_goal_max_gear_switches_);
   }
 
   mm_config_->visMM(local_start_goal_pub_, "start", 0, 0.8, start_state.head(3), start_state.tail(manipulator_dof_), start_gripper);
@@ -323,11 +332,9 @@ int KinoAstar::KinoAstarSearchAndGetSimplePath(const Eigen::VectorXd &start_pos,
       configureMotionModel(reverse_was_enabled);
       return forward_only_status;
     }
-    if(force_forward_only) configureMotionModel(configured_allow_reverse);
     if(achieve_hori) return KinoAstar::REACH_HORIZON;
     else return KinoAstar::REACH_END;
   }else{
-    if(force_forward_only) configureMotionModel(configured_allow_reverse);
     return KinoAstar::NO_PATH;
   }
 }
@@ -549,6 +556,12 @@ int KinoAstar::search(Eigen::VectorXd &start_state, const Eigen::VectorXd &end_s
   cur_node->g_score = 0.0;
   cur_node->input = Eigen::Vector2d(0.0, 0.0);
   cur_node->singul = getSingularity(start_state_(3));
+  if(bounded_reverse_mode_ &&
+     std::fabs(start_state_(3)) <= 1.5 * non_siguav_)
+    cur_node->singul = 0;
+  cur_node->reverse_distance = 0.0;
+  cur_node->forward_distance = 0.0;
+  cur_node->gear_switches = 0;
   cur_node->f_score = lambda_heu_ * getHeu(cur_node->state, end_state_.head(3));
   cur_node->node_state = IN_OPEN_SET;
   open_set_.push(cur_node);
@@ -559,14 +572,7 @@ int KinoAstar::search(Eigen::VectorXd &start_state, const Eigen::VectorXd &end_s
     cur_node = open_set_.top();
     recordSearchNode(cur_node);
     if((cur_node->state.head(2) - end_state_.head(2)).norm() < oneshot_range_ && initsearch){
-      int last_dir;
-      if(cur_node->parent != NULL){
-        bool is_forward = Eigen::Vector2d(cos(cur_node->parent->state(2)), sin(cos(cur_node->parent->state(2)))).transpose() * (cur_node->state - cur_node->parent->state).head(2) > 0;
-        last_dir = is_forward ? 1 : -1;
-      }else{
-        last_dir = 0;
-      }
-      is_shot_sucess(cur_node->state, end_state_.head(3), last_dir);
+      is_shot_sucess(cur_node, end_state_.head(3));
       if(is_shot_succ_){
         start_state = end_state;
         retrievePath(cur_node);
@@ -628,8 +634,29 @@ int KinoAstar::search(Eigen::VectorXd &start_state, const Eigen::VectorXd &end_s
       }
     }
     for (auto& input : inputs){
-      int singul;
-      singul = getSingularity(input[1]);
+      const int singul = getSingularity(input[1]);
+      const bool gear_switch =
+          cur_node->singul != 0 && singul * cur_node->singul < 0;
+      const int next_gear_switches =
+          cur_node->gear_switches + (gear_switch ? 1 : 0);
+      const double next_reverse_distance =
+          cur_node->reverse_distance +
+          (singul < 0 ? std::fabs(input[1]) : 0.0);
+      const double next_forward_distance =
+          cur_node->forward_distance +
+          (singul > 0 ? std::fabs(input[1]) : 0.0);
+
+      if(bounded_reverse_mode_){
+        const bool reverse_started_too_late =
+            singul < 0 &&
+            cur_node->forward_distance >
+                rear_goal_reverse_activation_forward_distance_;
+        if(reverse_started_too_late ||
+           next_reverse_distance > rear_goal_max_reverse_distance_ + 1e-6 ||
+           next_gear_switches > rear_goal_max_gear_switches_)
+          continue;
+      }
+
       stateTransit(cur_state, input, pro_state);
       if(!sdf_map_->isInMap(Eigen::Vector2d(pro_state(0), pro_state(1)))){
         continue;
@@ -685,6 +712,9 @@ int KinoAstar::search(Eigen::VectorXd &start_state, const Eigen::VectorXd &end_s
         pro_node->parent = cur_node;
         pro_node->node_state = IN_OPEN_SET;
         pro_node->singul = singul;
+        pro_node->reverse_distance = next_reverse_distance;
+        pro_node->forward_distance = next_forward_distance;
+        pro_node->gear_switches = next_gear_switches;
         open_set_.push(pro_node);
 
         expanded_nodes_.insert(pro_id, pro_yaw_id, pro_node);
@@ -704,6 +734,9 @@ int KinoAstar::search(Eigen::VectorXd &start_state, const Eigen::VectorXd &end_s
           pro_node->input = input;
           pro_node->parent = cur_node;
           pro_node->singul = singul;
+          pro_node->reverse_distance = next_reverse_distance;
+          pro_node->forward_distance = next_forward_distance;
+          pro_node->gear_switches = next_gear_switches;
         }
       }else{
         std::cout << "[kino astar] error type in searching: " << pro_node->node_state << std::endl;
@@ -743,9 +776,11 @@ inline double KinoAstar::getHeu(const Eigen::Vector3d &x1, const Eigen::Vector3d
   return (x1 - x2).head(2).norm();
 }
 
-bool KinoAstar::is_shot_sucess(const Eigen::Vector3d &state1, const Eigen::Vector3d &state2, int last_dir){
+bool KinoAstar::is_shot_sucess(
+    const PathNodePtr &start_node, const Eigen::Vector3d &state2){
   std::vector<Eigen::Vector3d> path_list;
   double len;
+  const Eigen::Vector3d &state1 = start_node->state;
 
   for(unsigned int i = 0; i < shotptr_list_.size(); i++){
     path_list.clear();
@@ -757,34 +792,66 @@ bool KinoAstar::is_shot_sucess(const Eigen::Vector3d &state1, const Eigen::Vecto
     to[0]   = state2[0]; to[1]   = state2[1]; to[2]   = state2[2];
     std::vector<double> reals;
     len = shotptr->distance(from(), to());
+    if(len < 1e-6){
+      is_shot_succ_ = true;
+      shotptrindex_ = i;
+      return true;
+    }
 
     for (double l = 0.0; l <= len; l += oneshot_check_len_ / 2.0){
       shotptr->interpolate(from(), to(), l / len, s());
       reals = s.reals();
       path_list.push_back(Eigen::Vector3d(reals[0], reals[1], reals[2]));        
     }
+    if(path_list.empty() ||
+       (path_list.back().head(2) - state2.head(2)).norm() > 1e-4)
+      path_list.push_back(state2);
     
     bool is_occ = false;
+    bool constraint_violation = false;
     double min_dist;
-    int traj_pieces = 0;
-    double traj_len = 0;
-    bool is_forward = Eigen::Vector2d(cos(path_list[0](2)), sin(cos(path_list[0](2)))).transpose() * (path_list[1] - path_list[0]).head(2) > 0;
-    int dir_last = is_forward ? 1 : -1;
-    if(last_dir != dir_last) ++traj_pieces;
-    ++traj_pieces;
+    int dir_last = start_node->singul;
+    int shot_switches = 0;
+    int total_gear_switches = start_node->gear_switches;
+    double reverse_distance = start_node->reverse_distance;
+    double forward_distance = start_node->forward_distance;
     for(unsigned int j = 0; j < path_list.size(); ++j){
       if(j < path_list.size() - 1){
-        is_forward = Eigen::Vector2d(cos(path_list[j](2)), sin(cos(path_list[j](2)))).transpose() * (path_list[j + 1] - path_list[j]).head(2) > 0;
-        int dir_now = is_forward ? 1 : -1;
-        if(dir_last != dir_now){
-          traj_len = 0.0;
-          ++traj_pieces;
-          dir_last = dir_now;
-          if(traj_pieces > 1){
-            return false;
+        const Eigen::Vector2d delta =
+            (path_list[j + 1] - path_list[j]).head(2);
+        const double segment_length = delta.norm();
+        if(segment_length > 1e-6){
+          const Eigen::Vector2d heading(
+              cos(path_list[j](2)), sin(path_list[j](2)));
+          const int dir_now = heading.dot(delta) >= 0.0 ? 1 : -1;
+          if(dir_last != 0 && dir_last != dir_now){
+            ++shot_switches;
+            ++total_gear_switches;
           }
-        }else{
-          traj_len += (path_list[j + 1] - path_list[j]).head(2).norm();
+
+          if(bounded_reverse_mode_){
+            if(dir_now < 0 &&
+               forward_distance >
+                   rear_goal_reverse_activation_forward_distance_){
+              constraint_violation = true;
+              break;
+            }
+            if(dir_now < 0)
+              reverse_distance += segment_length;
+            else
+              forward_distance += segment_length;
+
+            if(reverse_distance >
+                   rear_goal_max_reverse_distance_ + 1e-6 ||
+               total_gear_switches > rear_goal_max_gear_switches_){
+              constraint_violation = true;
+              break;
+            }
+          }else if(shot_switches > 1){
+            constraint_violation = true;
+            break;
+          }
+          dir_last = dir_now;
         }
       }
       if(mm_config_->checkCarObsCollision(path_list[j], false, false, min_dist)){
@@ -792,7 +859,7 @@ bool KinoAstar::is_shot_sucess(const Eigen::Vector3d &state1, const Eigen::Vecto
         break;
       }
     }
-    if(!is_occ){
+    if(!is_occ && !constraint_violation){
       is_shot_succ_ = true;
       shotptrindex_ = i;
       return true;

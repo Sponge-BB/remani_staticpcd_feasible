@@ -20,6 +20,7 @@
 #include <optimizer/poly_traj_optimizer.hpp>
 #include <plan_env/grid_map.h>
 #include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/Vector3Stamped.h>
 #include <traj_utils/DataDisp.h>
 #include <plan_manage/planner_manager.h>
 #include <plan_manage/planning_visualization.h>
@@ -108,10 +109,15 @@ namespace remani_planner
     double global_plan_dynamic_emergency_margin_;
     double global_plan_dynamic_emergency_min_distance_;
     double global_plan_dynamic_emergency_max_distance_;
+    double controller_progress_timeout_;
     int replan_fail_time_;
     int new_traj_fail_time_;
     int global_plan_max_failures_;
     int global_plan_trial_times_;
+    int rear_goal_plan_max_failures_;
+    int rear_goal_plan_trial_times_;
+    double rear_goal_plan_distance_;
+    double rear_goal_plan_cos_;
     double time_for_gripper_;
     bool global_plan_;
 
@@ -154,6 +160,7 @@ namespace remani_planner
     ros::NodeHandle node_;
     ros::Timer exec_timer_, safety_timer_;
     ros::Subscriber waypoint_sub_, odom_sub_, joint_state_sub_, gripper_state_sub_, trigger_sub_, assignment_sub_;
+    ros::Subscriber trajectory_progress_sub_, tracking_fault_sub_;
     ros::Publisher replan_pub_, new_pub_, poly_traj_pub_, data_disp_pub_, gripper_cmd_pub_, map_state_pub_;
     ros::Publisher safety_speed_limit_pub_;
 
@@ -175,6 +182,12 @@ namespace remani_planner
     bool has_last_dynamic_replan_collision_;
     bool dynamic_safety_speed_limit_active_;
     bool dynamic_replan_retry_pending_;
+    bool have_controller_progress_;
+    bool tracking_fault_active_;
+    double controller_trajectory_start_time_;
+    double controller_trajectory_time_;
+    double controller_trajectory_scale_;
+    ros::Time controller_progress_stamp_;
 
     int map_state_;
 
@@ -198,12 +211,18 @@ namespace remani_planner
     void publishSafetySpeedLimit(double speed_limit);
     void applyDynamicSafetySpeedLimit(double speed_limit);
     void clearDynamicSafetySpeedLimit(const ros::Time &now, bool force = false);
+    double getCurrentTrajectoryTime(const SingulTrajData &traj, const ros::Time &now) const;
+    double getCurrentTrajectoryScale(const SingulTrajData &traj, const ros::Time &now) const;
     bool validateStaticTrajectory(const SingulTrajData &traj, int &coll_type) const;
+    bool validateDynamicTrajectory(const SingulTrajData &traj, int &coll_type) const;
+    bool isRearDistantGoal() const;
     bool planNextWaypoint(const Eigen::VectorXd next_wp, const double nect_yaw);
     void waypointCallback(const geometry_msgs::PoseStamped::ConstPtr &msg);
     void mmCarOdomCallback(const nav_msgs::OdometryConstPtr &msg);
     void mmManiOdomCallback(const sensor_msgs::JointStateConstPtr &msg);
     void gripperCallback(const std_msgs::Bool::ConstPtr &msg);
+    void trajectoryProgressCallback(const geometry_msgs::Vector3Stamped::ConstPtr &msg);
+    void trackingFaultCallback(const std_msgs::Bool::ConstPtr &msg);
     void sendPolyTrajROSMsg();
     bool frontEndPathSearching();
     bool checkCollision();
