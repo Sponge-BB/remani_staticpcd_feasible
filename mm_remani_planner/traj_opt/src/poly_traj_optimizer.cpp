@@ -23,9 +23,13 @@ namespace remani_planner
     nh.param("optimization/weight_manipulator_hold", wei_mani_hold_, 0.0);
     nh.param("optimization/manipulator_hold_disable_path_deviation",
              mani_hold_disable_path_deviation_, 0.35);
+    nh.param("optimization/max_iterations", max_iterations_, 300);
+    nh.param("optimization/max_wall_time", max_wall_time_, 1.5);
     wei_mani_hold_ = std::max(0.0, wei_mani_hold_);
     mani_hold_disable_path_deviation_ =
         std::max(0.0, mani_hold_disable_path_deviation_);
+    max_iterations_ = std::max(20, max_iterations_);
+    max_wall_time_ = std::max(0.2, max_wall_time_);
 
     nh.param("optimization/dense_sample_resolution", dense_sample_resolution_, -1);
 
@@ -204,12 +208,13 @@ namespace remani_planner
     lbfgs_params.mem_size = 256;
     lbfgs_params.g_epsilon = 0.0;
     lbfgs_params.delta = 1e-3;
-    lbfgs_params.max_iterations = 1000;
+    lbfgs_params.max_iterations = max_iterations_;
 
     double final_cost;
     
     iter_num_ = 0;
     force_stop_type_ = DONT_STOP;
+    optimization_start_wall_time_ = ros::WallTime::now();
 
     /* ---------- optimize ---------- */
     // ros::Time t1 = ros::Time::now();
@@ -229,6 +234,15 @@ namespace remani_planner
       ROS_WARN("The optimization result is : %s", lbfgs::lbfgs_strerror(result));
     }else{
       ROS_INFO("The optimization result is : %s", lbfgs::lbfgs_strerror(result));      
+    }
+    if(force_stop_type_ == STOP_FOR_TIMEOUT){
+      ROS_WARN("[Optimizer] Stop after %.2f s wall-time budget.",
+               max_wall_time_);
+      return false;
+    }
+    if(force_stop_type_ == STOP_FOR_ERROR){
+      ROS_ERROR("[Optimizer] Reject trajectory after a non-finite cost or gradient.");
+      return false;
     }
 
     // test collision
@@ -482,6 +496,12 @@ namespace remani_planner
                                        Eigen::VectorXd &g)
   {
     PolyTrajOptimizer *opt = reinterpret_cast<PolyTrajOptimizer *>(instance);
+    if((ros::WallTime::now() - opt->optimization_start_wall_time_).toSec() >=
+       opt->max_wall_time_){
+      opt->force_stop_type_ = STOP_FOR_TIMEOUT;
+      g.setZero();
+      return 1.0e100;
+    }
     double total_smoo_cost = 0, total_time_cost = 0;
     Eigen::VectorXd obs_feas_costs(6), total_obs_feas_costs(6); // car-obs mani-obs mm-mm car_feasible mani_feasible quratic_variance
     obs_feas_costs.setZero();
@@ -589,16 +609,22 @@ namespace remani_planner
     }
     double costall = total_smoo_cost + total_obs_feas_costs.sum() + total_time_cost;
 
-    if (std::isnan(costall) || std::isinf(costall)) {
+    bool non_finite = std::isnan(costall) || std::isinf(costall);
+    if (non_finite) {
       ROS_ERROR_THROTTLE(1.0, "NAN DETECTED in OPTIMIZATION! smoo: %f, obs: %f, time: %f", total_smoo_cost, total_obs_feas_costs.sum(), total_time_cost);
     }
     
     for(int idx = 0; idx < g.size(); ++idx) {
       if (std::isnan(g(idx)) || std::isinf(g(idx))) {
         ROS_ERROR_THROTTLE(1.0, "NAN DETECTED IN GRADIENT AT %d", idx);
-        costall = NAN;
+        non_finite = true;
         break;
       }
+    }
+    if(non_finite){
+      opt->force_stop_type_ = STOP_FOR_ERROR;
+      g.setZero();
+      return 1.0e100;
     }
 
     opt->iter_num_ += 1;
@@ -614,8 +640,11 @@ namespace remani_planner
                                     const int ls)
   {
     PolyTrajOptimizer *opt = reinterpret_cast<PolyTrajOptimizer *>(func_data);
+    if((ros::WallTime::now() - opt->optimization_start_wall_time_).toSec() >=
+       opt->max_wall_time_)
+      opt->force_stop_type_ = STOP_FOR_TIMEOUT;
 
-    return (opt->force_stop_type_ == STOP_FOR_ERROR || opt->force_stop_type_ == STOP_FOR_REBOUND);
+    return opt->force_stop_type_ != DONT_STOP;
   }
 
   /* mappings between real world time and unconstrained virtual time */

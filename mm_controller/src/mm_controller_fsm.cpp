@@ -19,6 +19,8 @@ MMControllerFSM::MMControllerFSM(const ros::NodeHandle& nh) : nh_(nh){
 	nh_.param("controller/arm_tracking_resume_error", arm_tracking_resume_error_, 0.06);
 	nh_.param("controller/arm_tracking_min_time_scale", arm_tracking_min_time_scale_, 0.10);
 	nh_.param("controller/arm_tracking_joint_timeout", arm_tracking_joint_timeout_, 0.25);
+	nh_.param("controller/terminal_yaw_sample_window", terminal_yaw_sample_window_, 1.0);
+	nh_.param("controller/terminal_yaw_min_speed", terminal_yaw_min_speed_, 0.01);
 	yaw_hold_speed_ = std::max(0.0, yaw_hold_speed_);
 	curvature_ff_start_speed_ = std::max(0.0, curvature_ff_start_speed_);
 	curvature_ff_full_speed_ = std::max(curvature_ff_start_speed_ + 1e-3,
@@ -36,11 +38,15 @@ MMControllerFSM::MMControllerFSM(const ros::NodeHandle& nh) : nh_(nh){
 	arm_tracking_min_time_scale_ =
 		std::max(0.0, std::min(1.0, arm_tracking_min_time_scale_));
 	arm_tracking_joint_timeout_ = std::max(0.05, arm_tracking_joint_timeout_);
+	terminal_yaw_sample_window_ = std::max(0.05, terminal_yaw_sample_window_);
+	terminal_yaw_min_speed_ = std::max(1e-4, terminal_yaw_min_speed_);
 	safety_speed_limit_ = -1.0;
 	virtual_traj_time_ = 0.0;
 	virtual_time_scale_ = 1.0;
 	max_arm_tracking_error_ = 0.0;
+	terminal_yaw_ = 0.0;
 	arm_tracking_hold_active_ = false;
+	have_terminal_yaw_ = false;
 	active_trajectory_seq_ = 0;
 	last_virtual_clock_stamp_ = ros::Time(0);
 	trajectory_activation_stamp_ = ros::Time(0);
@@ -200,7 +206,7 @@ void MMControllerFSM::CMD_CTRL_process()
 					auto & traj_info = trajectory_data.singul_traj_data.singul_traj.back().traj;
 					stay_joint_ = traj_info.getJuncPos(traj_info.getPieceNum()).tail(manipulator_dof_);
 					stay_pos_ = traj_info.getJuncPos(traj_info.getPieceNum()).head(mobile_base_dof_);
-					stay_yaw_ = state_data.car_yaw;
+					stay_yaw_ = have_terminal_yaw_ ? terminal_yaw_ : state_data.car_yaw;
 				}else{
 					update_stay_state(false);
 				}
@@ -261,6 +267,7 @@ void MMControllerFSM::syncTrajectoryClock(const ros::Time &now){
 	virtual_time_scale_ = trajectory_data.exec_traj == 1 ? 1.0 : 0.0;
 	max_arm_tracking_error_ = 0.0;
 	arm_tracking_hold_active_ = false;
+	updateTerminalYaw();
 	last_virtual_clock_stamp_ = now;
 	trajectory_activation_stamp_ = now;
 	if(trajectory_data.exec_traj == 1 &&
@@ -270,6 +277,32 @@ void MMControllerFSM::syncTrajectoryClock(const ros::Time &now){
 			trajectory_data.singul_traj_data.start_time_ros;
 	ROS_INFO("[MMctrl] Reset virtual trajectory clock for update %lu.",
 	         static_cast<unsigned long>(active_trajectory_seq_));
+}
+
+void MMControllerFSM::updateTerminalYaw(){
+	have_terminal_yaw_ = false;
+	terminal_yaw_ = state_data.car_yaw;
+	const auto &traj = trajectory_data.singul_traj_data;
+	if(trajectory_data.exec_traj != 1 || traj.singul_traj.empty() || traj.duration <= 0.0)
+		return;
+
+	const double earliest_sample =
+		std::max(0.0, traj.duration - terminal_yaw_sample_window_);
+	for(double sample_time = traj.duration;
+	    sample_time >= earliest_sample - 1e-6;
+	    sample_time -= 0.05){
+		const Eigen::VectorXd velocity = traj.getVel(std::max(0.0, sample_time));
+		if(velocity.head(mobile_base_dof_).norm() < terminal_yaw_min_speed_)
+			continue;
+		const int singul = traj.getSingul(std::max(0.0, sample_time));
+		terminal_yaw_ = atan2(
+			singul * velocity(1), singul * velocity(0));
+		have_terminal_yaw_ = true;
+		ROS_INFO("[MMctrl] Terminal yaw captured from trajectory: %.3f rad.",
+		         terminal_yaw_);
+		return;
+	}
+	ROS_WARN("[MMctrl] Unable to recover terminal yaw from the final trajectory segment.");
 }
 
 void MMControllerFSM::advanceTrajectoryClock(const ros::Time &now){

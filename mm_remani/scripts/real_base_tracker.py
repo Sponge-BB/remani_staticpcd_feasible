@@ -78,6 +78,13 @@ class RealBaseTracker:
         self.goal_position_tolerance = max(0.01, rospy.get_param('~goal_position_tolerance', 0.05))
         self.goal_yaw_tolerance = max(0.01, rospy.get_param('~goal_yaw_tolerance', 0.1))
         self.goal_speed_tolerance = max(0.0, rospy.get_param('~goal_speed_tolerance', 0.05))
+        self.final_alignment_position_tolerance = max(
+            self.goal_position_tolerance,
+            rospy.get_param('~final_alignment_position_tolerance', 0.10))
+        self.final_alignment_max_angular_speed = max(
+            0.05, rospy.get_param('~final_alignment_max_angular_speed', 0.25))
+        self.final_alignment_k_yaw = max(
+            0.1, rospy.get_param('~final_alignment_k_yaw', 1.0))
         self.local_reverse_recovery = rospy.get_param('~local_reverse_recovery', True)
         self.local_reverse_max_distance = max(0.02, rospy.get_param('~local_reverse_max_distance', 0.15))
         self.local_reverse_max_lateral_error = max(0.01, rospy.get_param('~local_reverse_max_lateral_error', 0.08))
@@ -197,6 +204,10 @@ class RealBaseTracker:
         eyaw = self.normalize_angle(self.target_yaw - self.current_yaw)
 
         dist = math.hypot(ex_global, ey_global)
+        final_alignment = (
+            dist <= self.final_alignment_position_tolerance and
+            abs(v_r) < self.goal_speed_tolerance and
+            abs(eyaw) >= self.goal_yaw_tolerance)
         err_msg = Float64MultiArray()
         err_msg.data = [dist, ex, ey, eyaw]
         self.err_pub.publish(err_msg)
@@ -216,7 +227,7 @@ class RealBaseTracker:
                 self.publish_stop()
                 return
         elif (dist > self.tracking_stop_distance or
-              abs(eyaw) > self.tracking_stop_yaw):
+              (abs(eyaw) > self.tracking_stop_yaw and not final_alignment)):
             self.set_tracking_fault(
                 True,
                 "reference error %.3fm / %.3frad exceeds %.3fm / %.3frad" %
@@ -237,8 +248,17 @@ class RealBaseTracker:
         # cmd.angular.z = omega_des + k_yaw * eyaw + k_y * |v| * ey
         # ========================================================
         cmd = Twist()
-        cmd.linear.x = v_r * math.cos(eyaw) + self.k_x * ex
-        cmd.angular.z = self.target_w + self.k_yaw * eyaw + self.k_y * v_r * ey
+        if final_alignment:
+            cmd.linear.x = 0.0
+            cmd.angular.z = self.final_alignment_k_yaw * eyaw
+            cmd.angular.z = max(
+                -self.final_alignment_max_angular_speed,
+                min(self.final_alignment_max_angular_speed, cmd.angular.z))
+            rospy.loginfo_throttle(
+                1.0, "Final yaw alignment: error %.3f rad", eyaw)
+        else:
+            cmd.linear.x = v_r * math.cos(eyaw) + self.k_x * ex
+            cmd.angular.z = self.target_w + self.k_yaw * eyaw + self.k_y * v_r * ey
 
         # 安全限幅
         if cmd.linear.x > self.max_v:  cmd.linear.x = self.max_v

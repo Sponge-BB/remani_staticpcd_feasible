@@ -92,7 +92,9 @@ namespace remani_planner
     double goal_position_tolerance_;
     double goal_yaw_tolerance_;
     double goal_arm_tolerance_;
+    double goal_yaw_alignment_timeout_;
     double actual_state_collision_check_interval_;
+    double actual_base_emergency_margin_;
     double global_plan_dynamic_lookahead_time_;
     double global_plan_dynamic_check_interval_;
     double global_plan_dynamic_check_time_step_;
@@ -106,6 +108,7 @@ namespace remani_planner
     double global_plan_dynamic_replan_hold_time_;
     double global_plan_dynamic_same_obstacle_radius_;
     double global_plan_dynamic_retry_interval_;
+    int global_plan_dynamic_max_replans_per_event_;
     double global_plan_dynamic_slowdown_distance_;
     double global_plan_dynamic_slowdown_min_speed_;
     double global_plan_dynamic_slowdown_max_speed_;
@@ -119,6 +122,7 @@ namespace remani_planner
     int new_traj_fail_time_;
     int global_plan_max_failures_;
     int global_plan_trial_times_;
+    double global_plan_max_wall_time_;
     int rear_goal_plan_max_failures_;
     int rear_goal_plan_trial_times_;
     double rear_goal_plan_distance_;
@@ -194,6 +198,8 @@ namespace remani_planner
     double controller_trajectory_time_;
     double controller_trajectory_scale_;
     ros::Time controller_progress_stamp_;
+    ros::Time goal_yaw_alignment_start_time_;
+    int dynamic_event_replan_attempts_;
 
     int map_state_;
 

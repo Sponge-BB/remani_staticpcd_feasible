@@ -67,6 +67,9 @@ namespace remani_planner
     bool opt_gear_ = true;
     double wei_mani_hold_ = 0.0;
     double mani_hold_disable_path_deviation_ = 0.35;
+    int max_iterations_ = 300;
+    double max_wall_time_ = 1.5;
+    ros::WallTime optimization_start_wall_time_;
     bool mani_hold_enabled_ = false;
     Eigen::VectorXd mani_hold_reference_;
 
@@ -99,7 +102,8 @@ namespace remani_planner
     {
       DONT_STOP,
       STOP_FOR_REBOUND,
-      STOP_FOR_ERROR
+      STOP_FOR_ERROR,
+      STOP_FOR_TIMEOUT
     } force_stop_type_;
 
     /* optimization parameters */

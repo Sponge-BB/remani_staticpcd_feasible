@@ -32,7 +32,11 @@ remani_planner_node:
     goal_position_tolerance: 0.10
     goal_yaw_tolerance: 0.15
     goal_arm_tolerance: 0.12
+    # 轨迹结束后由底盘低速补齐终点朝向；超时后手动目标按位置到达收尾。
+    goal_yaw_alignment_timeout: 8.0
     actual_state_collision_check_interval: 0.05
+    # 当前真实底盘只在几何轮廓进入 1cm 紧急余量时硬停，规划安全边界保持不变。
+    actual_base_emergency_margin: 0.01
     # 靠近目标时停止重规划的距离阈值 (米)
     thresh_no_replan_meter: 1.0
     # 紧急停车时间窗口 (秒)，碰撞距离<此值时触发急停
@@ -49,11 +53,12 @@ remani_planner_node:
     global_plan_dynamic_immediate_confirm_distance: 1.0
     global_plan_dynamic_confirm_frames: 2
     global_plan_dynamic_confirm_timeout: 0.60
-    # 短暂漏检时保持限速；新轨迹发布后只抑制同一位置的重复事件。
-    global_plan_dynamic_clear_hold_time: 0.40
-    global_plan_dynamic_replan_hold_time: 1.00
+    # 短暂漏检时保持限速；连续动态事件最多规划两次，避免沿障碍物反复抖动。
+    global_plan_dynamic_clear_hold_time: 0.80
+    global_plan_dynamic_replan_hold_time: 3.00
     global_plan_dynamic_same_obstacle_radius: 0.45
     global_plan_dynamic_retry_interval: 0.50
+    global_plan_dynamic_max_replans_per_event: 2
     # 障碍物进入空间前视后先连续限速，只有进入动态制动距离才急停。
     global_plan_dynamic_slowdown_distance: 2.0
     global_plan_dynamic_slowdown_min_speed: 0.08
@@ -70,6 +75,8 @@ remani_planner_node:
     rear_goal_plan_max_failures: 3
     rear_goal_plan_distance: 0.50
     rear_goal_plan_cos: -0.20
+    # 单轮全局规划让出 ROS 回调的总墙钟时间上限。
+    global_plan_max_wall_time: 3.0
     # 手动 2D 导航主轨迹保持当前机械臂姿态；避障结束后再原地恢复待机位。
     manual_target_end_arm_standby: false
     manual_restore_standby_after_goal: true
@@ -101,6 +108,9 @@ remani_planner_node:
     weight_manipulator_hold: 2.0
     # 前端已规划出明显避障动作时关闭保持代价，避免把桥下动作压到最后。
     manipulator_hold_disable_path_deviation: 0.35
+    # 防止异常代价或坏初值长时间占住单线程 ROS 回调。
+    max_iterations: 300
+    max_wall_time: 1.5
 
   # --- ESDF 地图障碍物膨胀 ---
   grid_map:
@@ -132,6 +142,9 @@ mm_controller_node:
     arm_tracking_resume_error: 0.06
     arm_tracking_min_time_scale: 0.10
     arm_tracking_joint_timeout: 0.25
+    # 从轨迹末段恢复终点车身朝向，供轨迹结束后的原地低速对齐使用。
+    terminal_yaw_sample_window: 1.0
+    terminal_yaw_min_speed: 0.01
 
 # --- 实车底盘轨迹追踪器的安全死区 ---
 real_base_tracker:
@@ -156,6 +169,9 @@ real_base_tracker:
   goal_position_tolerance: 0.05
   goal_yaw_tolerance: 0.10
   goal_speed_tolerance: 0.05
+  final_alignment_position_tolerance: 0.10
+  final_alignment_max_angular_speed: 0.25
+  final_alignment_k_yaw: 1.0
   # 默认不执行长距离倒车，只允许重规划交接时的小幅、低速回退校正。
   local_reverse_recovery: true
   local_reverse_max_distance: 0.15

@@ -50,11 +50,15 @@ controller:
   virtual_time_min_reference_speed: 0.05
   virtual_time_scale_rise_rate: 0.80
   virtual_time_scale_fall_rate: 2.00
+  terminal_yaw_sample_window: 1.0
+  terminal_yaw_min_speed: 0.01
 
 optimization:
   weight_obstacle          : 50000.0  # Weight for obstacle
   weight_manipulator_hold  : 2.0      # Prefer the current pose without blocking necessary clearance motion
   manipulator_hold_disable_path_deviation: 0.35 # Disable hold when the front end found a real clearance maneuver
+  max_iterations          : 300       # Bound optimizer work so callbacks remain responsive
+  max_wall_time           : 1.5       # Per optimization wall-time budget (s)
   weight_manipulator_self       : 1000.0   # Weight for self collision
   weight_base_feasibility       : 100.0    # Weight for base feasibility
   weight_manipulator_feasibility: 100.0    # Weight for manipulator feasibility
@@ -88,16 +92,19 @@ fsm:
   goal_position_tolerance: 0.10
   goal_yaw_tolerance: 0.15
   goal_arm_tolerance: 0.12
+  goal_yaw_alignment_timeout: 8.0
   actual_state_collision_check_interval: 0.05
+  actual_base_emergency_margin: 0.01
   global_plan_dynamic_lookahead_distance: 2.0
   global_plan_dynamic_far_sample_distance: 0.10
   global_plan_dynamic_immediate_confirm_distance: 1.0
   global_plan_dynamic_confirm_frames: 2
   global_plan_dynamic_confirm_timeout: 0.60
-  global_plan_dynamic_clear_hold_time: 0.40
-  global_plan_dynamic_replan_hold_time: 0.60
+  global_plan_dynamic_clear_hold_time: 0.80
+  global_plan_dynamic_replan_hold_time: 3.00
   global_plan_dynamic_same_obstacle_radius: 0.45
   global_plan_dynamic_retry_interval: 0.30
+  global_plan_dynamic_max_replans_per_event: 2
   global_plan_dynamic_slowdown_distance: 2.0
   global_plan_dynamic_slowdown_min_speed: 0.08
   global_plan_dynamic_slowdown_max_speed: 0.20
@@ -109,6 +116,7 @@ fsm:
   controller_progress_timeout: 0.50
   global_plan_trial_times: 5  # Attempts per global planning cycle before yielding callbacks
   global_plan_max_failures: 5 # Give up an unreachable manual goal after this many failed cycles
+  global_plan_max_wall_time: 3.0
   rear_goal_plan_trial_times: 3
   rear_goal_plan_max_failures: 3
   rear_goal_plan_distance: 0.50

@@ -33,8 +33,11 @@ namespace remani_planner
     nh.param("fsm/goal_position_tolerance", goal_position_tolerance_, 0.10);
     nh.param("fsm/goal_yaw_tolerance", goal_yaw_tolerance_, 0.15);
     nh.param("fsm/goal_arm_tolerance", goal_arm_tolerance_, 0.12);
+    nh.param("fsm/goal_yaw_alignment_timeout", goal_yaw_alignment_timeout_, 8.0);
     nh.param("fsm/actual_state_collision_check_interval",
              actual_state_collision_check_interval_, 0.05);
+    nh.param("fsm/actual_base_emergency_margin",
+             actual_base_emergency_margin_, 0.01);
     nh.param("fsm/global_plan_dynamic_lookahead_time", global_plan_dynamic_lookahead_time_, 2.0);
     nh.param("fsm/global_plan_dynamic_check_interval", global_plan_dynamic_check_interval_, 0.1);
     nh.param("fsm/global_plan_dynamic_check_time_step", global_plan_dynamic_check_time_step_, 0.05);
@@ -48,6 +51,8 @@ namespace remani_planner
     nh.param("fsm/global_plan_dynamic_replan_hold_time", global_plan_dynamic_replan_hold_time_, 0.6);
     nh.param("fsm/global_plan_dynamic_same_obstacle_radius", global_plan_dynamic_same_obstacle_radius_, 0.45);
     nh.param("fsm/global_plan_dynamic_retry_interval", global_plan_dynamic_retry_interval_, 0.3);
+    nh.param("fsm/global_plan_dynamic_max_replans_per_event",
+             global_plan_dynamic_max_replans_per_event_, 2);
     nh.param("fsm/global_plan_dynamic_slowdown_distance", global_plan_dynamic_slowdown_distance_, 2.0);
     nh.param("fsm/global_plan_dynamic_slowdown_min_speed", global_plan_dynamic_slowdown_min_speed_, 0.08);
     nh.param("fsm/global_plan_dynamic_slowdown_max_speed", global_plan_dynamic_slowdown_max_speed_, 0.20);
@@ -59,6 +64,7 @@ namespace remani_planner
     nh.param("fsm/controller_progress_timeout", controller_progress_timeout_, 0.5);
     nh.param("fsm/global_plan_max_failures", global_plan_max_failures_, 3);
     nh.param("fsm/global_plan_trial_times", global_plan_trial_times_, 3);
+    nh.param("fsm/global_plan_max_wall_time", global_plan_max_wall_time_, 3.0);
     nh.param("fsm/rear_goal_plan_max_failures", rear_goal_plan_max_failures_, 3);
     nh.param("fsm/rear_goal_plan_trial_times", rear_goal_plan_trial_times_, 3);
     nh.param("fsm/rear_goal_plan_distance", rear_goal_plan_distance_, 0.5);
@@ -102,8 +108,13 @@ namespace remani_planner
     goal_position_tolerance_ = std::max(0.01, goal_position_tolerance_);
     goal_yaw_tolerance_ = std::max(0.01, goal_yaw_tolerance_);
     goal_arm_tolerance_ = std::max(0.01, goal_arm_tolerance_);
+    goal_yaw_alignment_timeout_ = std::max(0.5, goal_yaw_alignment_timeout_);
     actual_state_collision_check_interval_ =
         std::max(0.01, actual_state_collision_check_interval_);
+    actual_base_emergency_margin_ = std::max(0.0, actual_base_emergency_margin_);
+    global_plan_dynamic_max_replans_per_event_ =
+        std::max(1, global_plan_dynamic_max_replans_per_event_);
+    global_plan_max_wall_time_ = std::max(0.5, global_plan_max_wall_time_);
     last_global_plan_dynamic_check_time_ = ros::Time(0);
     last_actual_state_collision_check_time_ = ros::Time(0);
     last_dynamic_collision_time_ = ros::Time(0);
@@ -120,12 +131,14 @@ namespace remani_planner
     has_last_dynamic_replan_collision_ = false;
     dynamic_safety_speed_limit_active_ = false;
     dynamic_replan_retry_pending_ = false;
+    dynamic_event_replan_attempts_ = 0;
     have_controller_progress_ = false;
     tracking_fault_active_ = false;
     controller_trajectory_start_time_ = 0.0;
     controller_trajectory_time_ = 0.0;
     controller_trajectory_scale_ = 1.0;
     controller_progress_stamp_ = ros::Time(0);
+    goal_yaw_alignment_start_time_ = ros::Time(0);
 
     nh.param("mm/mobile_base_dof", mobile_base_dim_, -1);
     nh.param("mm/manipulator_dof", manipulator_dim_, -1);
@@ -324,6 +337,20 @@ namespace remani_planner
           ros::Time::now() < next_dynamic_replan_retry_time_) {
         goto force_return;
       }
+      if(dynamic_replan_retry_pending_){
+        if(dynamic_event_replan_attempts_ >=
+           global_plan_dynamic_max_replans_per_event_){
+          dynamic_replan_retry_pending_ = false;
+          ROS_WARN_THROTTLE(
+              1.0,
+              "[FSM] Dynamic event replan budget exhausted (%d); keep the "
+              "current speed limit and wait for the obstacle event to clear.",
+              dynamic_event_replan_attempts_);
+          changeFSMExecState(EXEC_TRAJ, "DYNAMIC_EVENT_BUDGET");
+          goto force_return;
+        }
+        ++dynamic_event_replan_attempts_;
+      }
 
       if(planFromLocalTraj(flag_relan_astar_)){
         replan_fail_time_ = 0;
@@ -381,10 +408,45 @@ namespace remani_planner
       const double actual_goal_arm_error =
           (mm_state_pos_.segment(mobile_base_dim_, manipulator_dim_) -
            end_pt_.segment(mobile_base_dim_, manipulator_dim_)).cwiseAbs().maxCoeff();
-      const bool actual_at_goal =
-          actual_goal_position_error <= goal_position_tolerance_ &&
-          actual_goal_yaw_error <= goal_yaw_tolerance_ &&
+      const bool actual_position_at_goal =
+          actual_goal_position_error <= goal_position_tolerance_;
+      const bool actual_yaw_at_goal =
+          actual_goal_yaw_error <= goal_yaw_tolerance_;
+      const bool actual_arm_at_goal =
           actual_goal_arm_error <= goal_arm_tolerance_;
+      const bool actual_position_and_arm_at_goal =
+          actual_position_at_goal && actual_arm_at_goal;
+      bool accept_manual_yaw_timeout = false;
+
+      if(trajectory_finished && touch_the_goal &&
+         actual_position_and_arm_at_goal && !actual_yaw_at_goal){
+        if(goal_yaw_alignment_start_time_.isZero())
+          goal_yaw_alignment_start_time_ = now;
+        const double alignment_elapsed =
+            (now - goal_yaw_alignment_start_time_).toSec();
+        accept_manual_yaw_timeout =
+            target_type_ == TARGET_TYPE::MANUAL_TARGET &&
+            alignment_elapsed >= goal_yaw_alignment_timeout_;
+        if(!accept_manual_yaw_timeout){
+          ROS_INFO_THROTTLE(
+              1.0,
+              "[FSM] Position and arm reached; wait for bounded final yaw alignment "
+              "(error=%.3f rad, %.1f/%.1f s).",
+              actual_goal_yaw_error, alignment_elapsed,
+              goal_yaw_alignment_timeout_);
+          break;
+        }
+        ROS_WARN_THROTTLE(
+            1.0,
+            "[FSM] Manual goal yaw alignment timed out at %.3f rad; accept the "
+            "position goal without another whole-body replan.",
+            actual_goal_yaw_error);
+      }else{
+        goal_yaw_alignment_start_time_ = ros::Time(0);
+      }
+      const bool actual_at_goal =
+          actual_position_and_arm_at_goal &&
+          (actual_yaw_at_goal || accept_manual_yaw_timeout);
 
       if((target_type_ == TARGET_TYPE::PRESET_TARGET) && close_to_no_replan_thresh){
         if((wpt_id_ < waypoint_num_ - 1) && need_to_plan_next){
@@ -596,6 +658,7 @@ namespace remani_planner
     if (force)
       dynamic_replan_retry_pending_ = false;
     dynamic_collision_confirm_count_ = 0;
+    dynamic_event_replan_attempts_ = 0;
     last_dynamic_collision_time_ = ros::Time(0);
     last_dynamic_seen_time_ = ros::Time(0);
     has_last_dynamic_confirmation_pos_ = false;
@@ -650,15 +713,56 @@ namespace remani_planner
               actual_state_collision_check_interval_;
       if (has_default_arm_ && time_for_actual_state_check){
         last_actual_state_collision_check_time_ = now;
+        const Eigen::Vector3d actual_base_state(
+            mm_state_pos_(0), mm_state_pos_(1), mm_car_yaw_);
+        const Eigen::VectorXd actual_arm_state =
+            mm_state_pos_.segment(mobile_base_dim_, manipulator_dim_);
+        const double actual_base_min_distance =
+            planner_manager_->mm_config_->getCarObstacleMinDistance(
+                actual_base_state, true);
+        const double actual_base_hard_stop_distance =
+            planner_manager_->mm_config_->getBaseCheckRadius() +
+            actual_base_emergency_margin_;
+        const double actual_base_guard_distance =
+            planner_manager_->mm_config_->getBaseCheckRadius() +
+            planner_manager_->mm_config_->getMapResolution();
+
         int actual_coll_type = -1;
-        if (planner_manager_->mm_config_->checkcollision(
-                Eigen::Vector3d(mm_state_pos_(0), mm_state_pos_(1), mm_car_yaw_),
-                mm_state_pos_.segment(mobile_base_dim_, manipulator_dim_),
-                false, actual_coll_type)){
+        double actual_collision_distance = actual_base_min_distance;
+        bool actual_collision =
+            actual_base_min_distance < actual_base_hard_stop_distance;
+        if(actual_collision){
+          actual_coll_type = 0;
+        }else{
+          if(actual_base_min_distance < actual_base_guard_distance){
+            ROS_WARN_THROTTLE(
+                1.0,
+                "[FSM] Real base entered the voxel guard band "
+                "(distance=%.3f m, hard_stop=%.3f m); keep monitoring without "
+                "locking the A* start state.",
+                actual_base_min_distance, actual_base_hard_stop_distance);
+          }
+          if(planner_manager_->mm_config_->checkManiObsCollision(
+                 actual_base_state, actual_arm_state, false,
+                 actual_collision_distance)){
+            actual_collision = true;
+            actual_coll_type = 1;
+          }else if(planner_manager_->mm_config_->checkCarManiCollision(
+                        actual_arm_state, false, actual_collision_distance)){
+            actual_collision = true;
+            actual_coll_type = 2;
+          }else if(planner_manager_->mm_config_->checkManiManiCollision(
+                        actual_arm_state, false, actual_collision_distance)){
+            actual_collision = true;
+            actual_coll_type = 3;
+          }
+        }
+        if(actual_collision){
           ROS_ERROR_THROTTLE(
               1.0,
-              "[FSM] Real whole-body state is in collision (type=%d); stop before using nominal trajectory.",
-              actual_coll_type);
+              "[FSM] Real whole-body state is in hard collision "
+              "(type=%d, distance=%.3f m); stop before using nominal trajectory.",
+              actual_coll_type, actual_collision_distance);
           dynamic_replan_retry_pending_ = false;
           publishSafetySpeedLimit(0.0);
           changeFSMExecState(EMERGENCY_STOP, "ACTUAL_STATE");
@@ -668,7 +772,15 @@ namespace remani_planner
 
       // Keep current-pose checking at 100 Hz for emergency reaction.
       if (planner_manager_->ploy_traj_opt_->checkCollision(*info, t_cur, coll_type)){
-        if(coll_type == 0){
+        if(coll_type == 0 && has_default_arm_){
+          // The measured-pose check above owns hard base stopping. The trajectory
+          // checker includes one full map voxel for planning clearance, which is
+          // intentionally too conservative for declaring the real base collided.
+          ROS_WARN_THROTTLE(
+              1.0,
+              "[FSM] Current trajectory sample entered the base planning guard "
+              "band; defer hard stop to the measured-pose distance check.");
+        }else if(coll_type == 0){
           ROS_WARN_THROTTLE(2.0, "car collision at current time %f!", t_cur);
         }else if (coll_type == 1){
           ROS_WARN_THROTTLE(2.0, "mani collision at current time %f!", t_cur);
@@ -677,8 +789,10 @@ namespace remani_planner
         }else if (coll_type == 3){
           ROS_WARN_THROTTLE(2.0, "mani-mani collision at current time %f!", t_cur);
         }
-        occ = true;
-        t_temp = t_cur;
+        if(coll_type != 0 || !has_default_arm_){
+          occ = true;
+          t_temp = t_cur;
+        }
       }
 
       // Scan the future trajectory against both the persistent PCD ESDF and
@@ -855,17 +969,29 @@ namespace remani_planner
 
       if (collision_is_dynamic && has_last_dynamic_replan_collision_ &&
           last_dynamic_replan_collision_type_ == coll_type &&
-          (dynamic_collision_position - last_dynamic_replan_collision_pos_).norm() <=
-              global_plan_dynamic_same_obstacle_radius_ &&
           now < dynamic_replan_hold_until_) {
         ROS_INFO_THROTTLE(
             1.0,
-            "[FSM] Keep executing the new trajectory while the same dynamic event settles (%.2f s).",
+            "[FSM] Keep executing the new trajectory while the continuous "
+            "dynamic event settles (%.2f s).",
             (dynamic_replan_hold_until_ - now).toSec());
+        return;
+      }
+      if(collision_is_dynamic &&
+         dynamic_event_replan_attempts_ >=
+             global_plan_dynamic_max_replans_per_event_){
+        ROS_WARN_THROTTLE(
+            1.0,
+            "[FSM] Suppress repeated planning for the same continuous dynamic "
+            "event (%d/%d); slowdown/emergency monitoring remains active.",
+            dynamic_event_replan_attempts_,
+            global_plan_dynamic_max_replans_per_event_);
         return;
       }
 
       ROS_INFO("Try to replan a safe trajectory");
+      if(collision_is_dynamic)
+        ++dynamic_event_replan_attempts_;
       if (planFromLocalTraj(false, !collision_is_dynamic)){ // Make a chance
         dynamic_collision_confirm_count_ = 0;
         last_dynamic_collision_time_ = ros::Time(0);
@@ -889,7 +1015,8 @@ namespace remani_planner
           has_last_dynamic_replan_collision_ = true;
           dynamic_replan_retry_pending_ = true;
           next_dynamic_replan_retry_time_ =
-              ros::Time::now() + ros::Duration(global_plan_dynamic_retry_interval_);
+              ros::Time::now() + ros::Duration(std::max(
+                  1.0, global_plan_dynamic_retry_interval_));
           dynamic_replan_hold_until_ = next_dynamic_replan_retry_time_;
           ROS_WARN("[FSM] Fast dynamic replan failed; keep the speed limit and retry after %.2f s.",
                    global_plan_dynamic_retry_interval_);
@@ -970,6 +1097,8 @@ namespace remani_planner
     clearDynamicSafetySpeedLimit(ros::Time::now(), true);
     last_dynamic_observation_seq_ = 0;
     dynamic_replan_retry_pending_ = false;
+    dynamic_event_replan_attempts_ = 0;
+    goal_yaw_alignment_start_time_ = ros::Time(0);
     dynamic_collision_confirm_count_ = 0;
     last_dynamic_collision_time_ = ros::Time(0);
     last_dynamic_seen_time_ = ros::Time(0);
@@ -1200,7 +1329,15 @@ namespace remani_planner
     bool flag_random_poly_init;
     if(timesOfConsecutiveStateCalls().first == 1) flag_random_poly_init = false;
     else flag_random_poly_init = true;
+    const ros::WallTime planning_start = ros::WallTime::now();
     for(int i = 0; i < trial_times; i++){
+      const double elapsed =
+          (ros::WallTime::now() - planning_start).toSec();
+      if(elapsed >= global_plan_max_wall_time_){
+        ROS_WARN("[FSM] Stop global planning retries after %.2f s wall-time budget.",
+                 elapsed);
+        break;
+      }
       if(callReboundReplan(true, flag_random_poly_init)){
         return true;
       }

@@ -93,6 +93,13 @@ namespace remani_planner
         double getBaseMaxAcc() const {
             return mobile_base_max_acc_;
         }
+        double getBaseCheckRadius() const {
+            return mobile_base_check_radius_;
+        }
+        double getMapResolution() const {
+            return map_resolution_;
+        }
+        double getCarObstacleMinDistance(const Eigen::Vector3d &car_state, bool precise);
         bool getUseFastArmer() const {
             return useFastArmer_;
         }

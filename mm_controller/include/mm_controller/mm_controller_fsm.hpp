@@ -72,13 +72,17 @@ private:
 	double arm_tracking_stop_error_;
 	double arm_tracking_resume_error_;
 	double arm_tracking_min_time_scale_;
-	double arm_tracking_joint_timeout_;
-	double safety_speed_limit_;
-	double virtual_traj_time_;
-	double virtual_time_scale_;
-	double max_arm_tracking_error_;
-	bool arm_tracking_hold_active_;
-	std::uint64_t active_trajectory_seq_;
+		double arm_tracking_joint_timeout_;
+		double terminal_yaw_sample_window_;
+		double terminal_yaw_min_speed_;
+		double safety_speed_limit_;
+		double virtual_traj_time_;
+		double virtual_time_scale_;
+		double max_arm_tracking_error_;
+		double terminal_yaw_;
+		bool arm_tracking_hold_active_;
+		bool have_terminal_yaw_;
+		std::uint64_t active_trajectory_seq_;
 	ros::Time last_virtual_clock_stamp_;
 	ros::Time trajectory_activation_stamp_;
 
@@ -88,9 +92,10 @@ private:
 	void publish_ctrl_cmd(const ros::Time &stamp);
 	void update_stay_state(bool mani_goto_init);
 	void publish_trigger(const nav_msgs::Odometry &odom_msg);
-	void syncTrajectoryClock(const ros::Time &now);
-	void advanceTrajectoryClock(const ros::Time &now);
-	void publishTrajectoryProgress(const ros::Time &stamp);
+		void syncTrajectoryClock(const ros::Time &now);
+		void advanceTrajectoryClock(const ros::Time &now);
+		void updateTerminalYaw();
+		void publishTrajectoryProgress(const ros::Time &stamp);
 	void cal_traj_ctrl_input(double duration);
 	void cal_stay_ctrl_input();
 	void limitErr(Eigen::VectorXd &x, const double x_low, const double x_upp);

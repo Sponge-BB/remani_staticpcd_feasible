@@ -1,5 +1,7 @@
 #include "mm_config/mm_config.hpp"
 
+#include <limits>
+
 namespace remani_planner
 {
 
@@ -607,9 +609,22 @@ void MMConfig::getJointTMat(const Eigen::VectorXd &theta, std::vector<Eigen::Mat
     }
 }
 
+double MMConfig::getCarObstacleMinDistance(
+    const Eigen::Vector3d &car_state, bool precise){
+    std::vector<Eigen::Vector3d> car_pts;
+    getCarPts(car_state, car_pts);
+    double min_dist = std::numeric_limits<double>::infinity();
+    for(const auto &point : car_pts){
+        const double dist = precise
+            ? grid_map_->getPreciseDistance(point)
+            : grid_map_->getDistance(point);
+        min_dist = std::min(min_dist, dist);
+    }
+    return min_dist;
+}
+
 bool MMConfig::checkCarObsCollision(Eigen::Vector3d car_state, bool precise, bool safe, double &min_dist){
     std::vector<Eigen::Vector3d> car_pts;
-    car_pts.clear();
     getCarPts(car_state, car_pts);
     double dist;
     double safe_dist = safe ? mobile_base_check_radius_ + car_safe_margin_ : mobile_base_check_radius_;
