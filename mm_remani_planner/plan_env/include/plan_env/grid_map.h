@@ -126,6 +126,7 @@ struct MappingData
   ros::Time global_map_stamp_;
   bool global_esdf_pending_;
   std::uint64_t dynamic_observation_seq_;
+  std::uint64_t esdf_observation_seq_;
 
   std::vector<double> tmp_buffer1_, tmp_buffer2_;
   std::vector<double> distance_buffer_;
@@ -263,6 +264,7 @@ public:
   // int getVoxelNum();
   bool getOdomDepthTimeout() { return md_.flag_depth_odom_timeout_; }
   std::uint64_t getDynamicObservationSeq() const { return md_.dynamic_observation_seq_; }
+  std::uint64_t getESDFObservationSeq() const { return md_.esdf_observation_seq_; }
 
   // esdf
   template <typename F_get_val, typename F_set_val>

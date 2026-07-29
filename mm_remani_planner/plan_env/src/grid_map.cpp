@@ -134,6 +134,7 @@ void GridMap::initMap(ros::NodeHandle &nh)
   md_.global_map_stamp_ = ros::Time(0);
   md_.global_esdf_pending_ = false;
   md_.dynamic_observation_seq_ = 0;
+  md_.esdf_observation_seq_ = 0;
 
   md_.astar_visited_ = vector<bool>(mp_.map_voxel_num_(0) * mp_.map_voxel_num_(1), false);
   md_.astar_free_length_ = vector<double>(mp_.map_voxel_num_(0) * mp_.map_voxel_num_(1), 1e10);
@@ -1007,6 +1008,7 @@ void GridMap::updateESDFCallback(const ros::TimerEvent& /*event*/){
   t1 = ros::Time::now();
 
   updateESDF3d();
+  md_.esdf_observation_seq_ = md_.dynamic_observation_seq_;
 
   t2 = ros::Time::now();
 
@@ -1826,7 +1828,6 @@ double GridMap::getDynamicObstacleDistance(const Eigen::Vector3d& pos, double ma
       0, static_cast<int>(std::ceil(mp_.dynamic_static_match_radius_ * mp_.resolution_inv_)));
   const double static_match_radius_sq =
       mp_.dynamic_static_match_radius_ * mp_.dynamic_static_match_radius_;
-  const double voxel_half_diagonal = 0.5 * std::sqrt(3.0) * mp_.resolution_;
   double min_dist = max_search_distance;
 
   const auto matches_static_map = [&](const Eigen::Vector3i& dynamic_id) {
@@ -1861,7 +1862,10 @@ double GridMap::getDynamicObstacleDistance(const Eigen::Vector3d& pos, double ma
 
         Eigen::Vector3d voxel_center;
         indexToPos(id, voxel_center);
-        const double dist = std::max(0.0, (voxel_center - pos).norm() - voxel_half_diagonal);
+        // ESDF collision checks measure distance to occupied voxel centers.
+        // Keep the live layer on the same convention so a trajectory accepted
+        // by fresh ESDF data is not rejected by a second, larger implicit margin.
+        const double dist = (voxel_center - pos).norm();
         min_dist = std::min(min_dist, dist);
       }
 

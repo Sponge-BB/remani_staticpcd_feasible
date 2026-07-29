@@ -343,6 +343,51 @@ namespace remani_planner
         if (ros::Time::now() < next_dynamic_replan_retry_time_)
           goto force_return;
 
+        const auto map = planner_manager_->grid_map_;
+        const std::uint64_t dynamic_observation_seq =
+            map->getDynamicObservationSeq();
+        const std::uint64_t esdf_observation_seq =
+            map->getESDFObservationSeq();
+        if (esdf_observation_seq < dynamic_observation_seq) {
+          next_dynamic_replan_retry_time_ =
+              ros::Time::now() + ros::Duration(0.01);
+          ROS_INFO_THROTTLE(
+              0.5,
+              "[FSM] Wait for live obstacle ESDF before replanning "
+              "(map_seq=%lu, esdf_seq=%lu).",
+              static_cast<unsigned long>(dynamic_observation_seq),
+              static_cast<unsigned long>(esdf_observation_seq));
+          goto force_return;
+        }
+
+        if (!dynamic_event_fast_replan_attempted_) {
+          dynamic_event_fast_replan_attempted_ = true;
+          ++dynamic_event_replan_attempts_;
+          ROS_INFO("[FSM] Live obstacle ESDF is current; try fast trajectory "
+                   "repair (%d/%d).",
+                   dynamic_event_replan_attempts_,
+                   global_plan_dynamic_max_replans_per_event_);
+          if (planFromLocalTraj(
+                  false, false,
+                  global_plan_dynamic_fast_replan_wall_time_)) {
+            replan_fail_time_ = 0;
+            dynamic_replan_retry_pending_ = false;
+            dynamic_replan_hold_until_ =
+                ros::Time::now() +
+                ros::Duration(global_plan_dynamic_replan_hold_time_);
+            flag_relan_astar_ = false;
+            changeFSMExecState(EXEC_TRAJ, "DYNAMIC_FAST_FRESH_ESDF");
+          } else {
+            next_dynamic_replan_retry_time_ =
+                ros::Time::now() +
+                ros::Duration(global_plan_dynamic_retry_interval_);
+            dynamic_replan_hold_until_ = next_dynamic_replan_retry_time_;
+            ROS_WARN("[FSM] Fresh-map fast repair failed; run A* after %.2f s.",
+                     global_plan_dynamic_retry_interval_);
+          }
+          break;
+        }
+
         if (dynamic_event_astar_attempted_ ||
             dynamic_event_replan_attempts_ >=
                 global_plan_dynamic_max_replans_per_event_) {
@@ -1035,6 +1080,28 @@ namespace remani_planner
         return;
       }
 
+      if (collision_is_dynamic) {
+        const std::uint64_t dynamic_observation_seq =
+            map->getDynamicObservationSeq();
+        const std::uint64_t esdf_observation_seq =
+            map->getESDFObservationSeq();
+        if (esdf_observation_seq < dynamic_observation_seq) {
+          last_dynamic_replan_collision_pos_ = dynamic_collision_position;
+          last_dynamic_replan_collision_type_ = coll_type;
+          has_last_dynamic_replan_collision_ = true;
+          dynamic_replan_retry_pending_ = true;
+          next_dynamic_replan_retry_time_ = ros::Time::now();
+          dynamic_replan_hold_until_ = next_dynamic_replan_retry_time_;
+          ROS_INFO("[FSM] New obstacle reached occupancy before ESDF "
+                   "(map_seq=%lu, esdf_seq=%lu); defer replanning until the "
+                   "same observation is searchable.",
+                   static_cast<unsigned long>(dynamic_observation_seq),
+                   static_cast<unsigned long>(esdf_observation_seq));
+          changeFSMExecState(REPLAN_TRAJ, "WAIT_DYNAMIC_ESDF");
+          return;
+        }
+      }
+
       ROS_INFO("Try to replan a safe trajectory");
       if(collision_is_dynamic) {
         dynamic_event_fast_replan_attempted_ = true;
@@ -1573,7 +1640,14 @@ namespace remani_planner
       }
       if (global_plan_ && dynamic_safety_speed_limit_active_ &&
           !validateDynamicTrajectory(candidate, coll_type)){
-        ROS_WARN("[FSM] Rejecting replan candidate: live obstacle collision type=%d remains.", coll_type);
+        const auto map = planner_manager_->grid_map_;
+        ROS_WARN("[FSM] Rejecting replan candidate: live obstacle collision "
+                 "type=%d remains (map_seq=%lu, esdf_seq=%lu).",
+                 coll_type,
+                 static_cast<unsigned long>(
+                     map->getDynamicObservationSeq()),
+                 static_cast<unsigned long>(
+                     map->getESDFObservationSeq()));
         if (preserve_executing_trajectory)
           planner_manager_->traj_container_.singul_traj_data = executing_trajectory;
         return false;
