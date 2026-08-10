@@ -92,6 +92,10 @@ void GridMap::initMap(ros::NodeHandle &nh)
   bool use_load_map_;
   nh.param("grid_map/use_load_map", use_load_map_, false);
 
+  // Dynamic point flow is an independent, time-aware layer. It is disabled by
+  // default and therefore cannot change the existing occupancy/ESDF behavior.
+  dynamic_point_buffer_.init(node_, mp_.frame_id_, tf_buffer_);
+
   if(mp_.local_bound_inflate_ > 1e-3) mp_.local_bound_inflate_ = max(mp_.resolution_, mp_.local_bound_inflate_);
   else mp_.local_bound_inflate_ = 0.0;
 

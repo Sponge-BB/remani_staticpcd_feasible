@@ -38,6 +38,10 @@ namespace remani_planner
              actual_state_collision_check_interval_, 0.05);
     nh.param("fsm/actual_base_emergency_margin",
              actual_base_emergency_margin_, 0.01);
+    nh.param("dynamic_point_flow/shadow_mode",
+             dynamic_point_flow_shadow_mode_, true);
+    nh.param("dynamic_point_flow/shadow_check_interval",
+             dynamic_point_flow_shadow_check_interval_, 0.1);
     nh.param("fsm/global_plan_dynamic_lookahead_time", global_plan_dynamic_lookahead_time_, 2.0);
     nh.param("fsm/global_plan_dynamic_check_interval", global_plan_dynamic_check_interval_, 0.1);
     nh.param("fsm/global_plan_dynamic_check_time_step", global_plan_dynamic_check_time_step_, 0.05);
@@ -116,10 +120,13 @@ namespace remani_planner
     actual_state_collision_check_interval_ =
         std::max(0.01, actual_state_collision_check_interval_);
     actual_base_emergency_margin_ = std::max(0.0, actual_base_emergency_margin_);
+    dynamic_point_flow_shadow_check_interval_ =
+        std::max(0.02, dynamic_point_flow_shadow_check_interval_);
     global_plan_dynamic_max_replans_per_event_ =
         std::max(2, global_plan_dynamic_max_replans_per_event_);
     global_plan_max_wall_time_ = std::max(0.5, global_plan_max_wall_time_);
     last_global_plan_dynamic_check_time_ = ros::Time(0);
+    last_dynamic_point_flow_shadow_check_time_ = ros::Time(0);
     last_actual_state_collision_check_time_ = ros::Time(0);
     last_dynamic_collision_time_ = ros::Time(0);
     last_dynamic_seen_time_ = ros::Time(0);
@@ -1033,6 +1040,12 @@ namespace remani_planner
       }
     }
 
+    // Observe the time-aware point-flow model without changing any FSM,
+    // speed-limit, or replanning decision in this rollout stage.
+    if (dynamic_point_flow_shadow_mode_ && map->dynamicPointFlowEnabled()) {
+      runDynamicPointFlowShadowCheck(*info, t_cur, now);
+    }
+
     if (occ){
       /* Handle the collided case immediately */
       if (collision_is_dynamic && dynamic_collision_path_distance <= dynamic_emergency_distance){
@@ -1564,6 +1577,131 @@ namespace remani_planner
             traj, traj.duration, coll_type))
       return false;
     return true;
+  }
+
+  void REMANIReplanFSM::runDynamicPointFlowShadowCheck(
+      const SingulTrajData &traj, double t_cur, const ros::Time &now)
+  {
+    if (!last_dynamic_point_flow_shadow_check_time_.isZero() &&
+        (now - last_dynamic_point_flow_shadow_check_time_).toSec() <
+            dynamic_point_flow_shadow_check_interval_)
+      return;
+    last_dynamic_point_flow_shadow_check_time_ = now;
+
+    const auto map = planner_manager_->grid_map_;
+    const plan_env::DynamicPointSnapshot snapshot =
+        map->getDynamicPointSnapshot(now);
+    if (!snapshot.valid)
+    {
+      ROS_WARN_THROTTLE(
+          2.0,
+          "[DynamicPointFlow][shadow] Snapshot unavailable (%s); existing live-map safety remains authoritative.",
+          snapshot.invalid_reason.c_str());
+      return;
+    }
+
+    if (snapshot.points.empty())
+    {
+      ROS_INFO_THROTTLE(
+          2.0,
+          "[DynamicPointFlow][shadow] Valid empty snapshot seq=%lu.",
+          static_cast<unsigned long>(snapshot.sequence));
+      return;
+    }
+
+    // Point prediction and trajectory sampling must share the controller's
+    // actual wall-time basis. Do not silently fall back to nominal speed in
+    // shadow metrics, otherwise slowdown/pause would produce misleading data.
+    const double progress_age =
+        (now - controller_progress_stamp_).toSec();
+    const bool progress_time_basis_valid =
+        have_controller_progress_ &&
+        std::fabs(controller_trajectory_start_time_ - traj.start_time) < 1e-3 &&
+        !controller_progress_stamp_.isZero() &&
+        progress_age >= -0.05 &&
+        progress_age <= controller_progress_timeout_;
+    if (!progress_time_basis_valid)
+    {
+      ROS_WARN_THROTTLE(
+          2.0,
+          "[DynamicPointFlow][shadow] Fresh matching controller progress is unavailable; skip time-aligned prediction.");
+      return;
+    }
+
+    const double execution_scale = controller_trajectory_scale_;
+    if (execution_scale <= 1e-3)
+    {
+      ROS_WARN_THROTTLE(
+          2.0,
+          "[DynamicPointFlow][shadow] Controller progress is paused; future wall-time alignment is undefined.");
+      return;
+    }
+
+    const double check_end = std::min(
+        traj.duration, t_cur + global_plan_dynamic_lookahead_time_);
+    if (check_end <= t_cur + 1e-9)
+    {
+      ROS_INFO_THROTTLE(
+          2.0,
+          "[DynamicPointFlow][shadow] No future trajectory remains inside the configured horizon.");
+      return;
+    }
+    bool query_valid = true;
+    bool predicted_collision = false;
+    int predicted_coll_type = -1;
+    double predicted_traj_time = std::numeric_limits<double>::infinity();
+    double predicted_wall_ahead = std::numeric_limits<double>::infinity();
+
+    double t_check = std::min(
+        check_end, t_cur + global_plan_dynamic_check_time_step_);
+    while (t_check <= check_end + 1e-9)
+    {
+      const double wall_ahead = (t_check - t_cur) / execution_scale;
+      const ros::Time query_time = now + ros::Duration(wall_ahead);
+      if (planner_manager_->ploy_traj_opt_->checkPredictedDynamicObstacleCollision(
+              traj, t_check, query_time, snapshot,
+              predicted_coll_type, query_valid))
+      {
+        predicted_collision = true;
+        predicted_traj_time = t_check;
+        predicted_wall_ahead = wall_ahead;
+        break;
+      }
+      if (!query_valid)
+        break;
+      if (t_check >= check_end - 1e-9)
+        break;
+      // Always sample the horizon endpoint even when the remaining duration is
+      // not an integer multiple of the configured checking step.
+      t_check = std::min(
+          check_end, t_check + global_plan_dynamic_check_time_step_);
+    }
+
+    if (!query_valid)
+    {
+      ROS_WARN_THROTTLE(
+          2.0,
+          "[DynamicPointFlow][shadow] Prediction horizon/time basis invalid for seq=%lu; result is not used for safety decisions.",
+          static_cast<unsigned long>(snapshot.sequence));
+      return;
+    }
+
+    if (predicted_collision)
+    {
+      ROS_WARN_THROTTLE(
+          1.0,
+          "[DynamicPointFlow][shadow] Predicted collision type=%d in %.2f s wall time (trajectory t=%.2f, seq=%lu); no control action in shadow mode.",
+          predicted_coll_type, predicted_wall_ahead, predicted_traj_time,
+          static_cast<unsigned long>(snapshot.sequence));
+    }
+    else
+    {
+      ROS_INFO_THROTTLE(
+          2.0,
+          "[DynamicPointFlow][shadow] Predicted horizon clear (%zu points, seq=%lu).",
+          snapshot.points.size(),
+          static_cast<unsigned long>(snapshot.sequence));
+    }
   }
 
   bool REMANIReplanFSM::callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj){

@@ -9,7 +9,7 @@ Note: make the script executable after creation:
 """
 from __future__ import print_function
 import rospy
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2, PointField
 import sensor_msgs.point_cloud2 as pc2
 from std_msgs.msg import Header
 import math
@@ -60,6 +60,22 @@ class MovingObstaclesNode(object):
         # also publish moving-only pointcloud so we can visualize moving obstacles
         self.moving_only_topic = rospy.get_param('~moving_only_topic', '/moving_obstacles_only')
         self.moving_pub = rospy.Publisher(self.moving_only_topic, PointCloud2, queue_size=1)
+        # Point-flow topic consumed by the planner's shadow predictor. Each
+        # surface point carries the analytic velocity of its parent obstacle.
+        self.dynamic_points_topic = rospy.get_param(
+            '~dynamic_points_topic', '/dynamic_points')
+        self.dynamic_points_pub = rospy.Publisher(
+            self.dynamic_points_topic, PointCloud2, queue_size=1)
+        self.dynamic_point_fields = [
+            PointField('x', 0, PointField.FLOAT32, 1),
+            PointField('y', 4, PointField.FLOAT32, 1),
+            PointField('z', 8, PointField.FLOAT32, 1),
+            PointField('vx', 12, PointField.FLOAT32, 1),
+            PointField('vy', 16, PointField.FLOAT32, 1),
+            PointField('vz', 20, PointField.FLOAT32, 1),
+            PointField('track_id', 24, PointField.UINT32, 1),
+            PointField('confidence', 28, PointField.FLOAT32, 1),
+        ]
 
         # moving object motion params
         self.map_x = rospy.get_param('/map/x_size', 8.0)
@@ -78,6 +94,7 @@ class MovingObstaclesNode(object):
 
         # store static points as tuples (x,y,z)
         frame = msg.header.frame_id if hasattr(msg.header, 'frame_id') else 'world'
+        frame = frame or 'world'
         pts = []
         for p in pc2.read_points(msg, skip_nans=True):
             # read_points yields (x,y,z,...)
@@ -111,6 +128,7 @@ class MovingObstaclesNode(object):
 
             # build moving box centers using simple trajectories
             moving_pts = []
+            dynamic_points = []
             # left-right (x-axis) oscillation for each moving box
             for i in range(self.moving_count):
                 # amplitude depends on map size but keep a safe margin
@@ -118,6 +136,7 @@ class MovingObstaclesNode(object):
                 omega = 0.6 + 0.1 * i
                 phase = i * math.pi / 3.0
                 cx = math.sin(omega * t + phase) * amp
+                vx = amp * omega * math.cos(omega * t + phase)
                 # spread boxes along y to avoid overlap
                 y_spacing = 0.8
                 cy = - (self.moving_count - 1) * y_spacing / 2.0 + i * y_spacing
@@ -136,16 +155,20 @@ class MovingObstaclesNode(object):
 
                 pts = self.box_points((cx, cy, cz), size, self.box_resolution)
                 moving_pts.extend(pts)
+                dynamic_points.extend(
+                    (x, y, z, vx, 0.0, 0.0, i, 1.0)
+                    for x, y, z in pts)
 
+            # Take the static points and their frame as one consistent snapshot.
+            with self._lock:
+                merged = list(self.static_points)
+                map_frame = self.map_frame or 'world'
             # merge static and moving
-            merged = list(self.static_points) if self.static_points else []
             merged.extend(moving_pts)
 
             header = Header()
             header.stamp = now
-            # read frame under lock to be consistent with callback
-            with self._lock:
-                header.frame_id = self.map_frame
+            header.frame_id = map_frame
             cloud_msg = pc2.create_cloud_xyz32(header, merged)
             self.pub.publish(cloud_msg)
             # publish moving-only cloud for visualization/debug
@@ -154,6 +177,9 @@ class MovingObstaclesNode(object):
             moving_header.frame_id = header.frame_id
             moving_cloud_msg = pc2.create_cloud_xyz32(moving_header, moving_pts)
             self.moving_pub.publish(moving_cloud_msg)
+            dynamic_cloud_msg = pc2.create_cloud(
+                moving_header, self.dynamic_point_fields, dynamic_points)
+            self.dynamic_points_pub.publish(dynamic_cloud_msg)
             # remember our publish time so the subscriber can ignore the echoed message
             try:
                 self._last_pub_time = header.stamp

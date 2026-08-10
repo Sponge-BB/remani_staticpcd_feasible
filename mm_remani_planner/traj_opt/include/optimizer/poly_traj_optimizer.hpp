@@ -154,6 +154,15 @@ namespace remani_planner
     }
     bool checkCollision(const SingulTrajData &traj, double t, int &coll_type);
     bool checkDynamicObstacleCollision(const SingulTrajData &traj, double t, int &coll_type);
+    bool checkPredictedDynamicObstacleCollision(
+        const SingulTrajData &traj, double t,
+        const plan_env::DynamicPointSnapshot &snapshot,
+        int &coll_type, bool &query_valid);
+    bool checkPredictedDynamicObstacleCollision(
+        const SingulTrajData &traj, double t,
+        const ros::Time &query_time,
+        const plan_env::DynamicPointSnapshot &snapshot,
+        int &coll_type, bool &query_valid);
 
     /* main planning API */
     bool OptimizeTrajectory_lbfgs(const std::vector<Eigen::MatrixXd> &iniStates_container, 

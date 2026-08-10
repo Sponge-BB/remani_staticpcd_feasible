@@ -24,6 +24,7 @@
 #include <message_filters/time_synchronizer.h>
 
 #include <plan_env/raycast.h>
+#include <plan_env/dynamic_point_buffer.h>
 
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -265,6 +266,21 @@ public:
   bool getOdomDepthTimeout() { return md_.flag_depth_odom_timeout_; }
   std::uint64_t getDynamicObservationSeq() const { return md_.dynamic_observation_seq_; }
   std::uint64_t getESDFObservationSeq() const { return md_.esdf_observation_seq_; }
+  bool dynamicPointFlowEnabled() const { return dynamic_point_buffer_.enabled(); }
+  plan_env::DynamicPointSnapshot getDynamicPointSnapshot(const ros::Time &now) const
+  {
+    return dynamic_point_buffer_.getSnapshot(now);
+  }
+  bool getPredictedDynamicObstacleDistance(
+      const plan_env::DynamicPointSnapshot &snapshot,
+      const Eigen::Vector3d &pos,
+      const ros::Time &query_time,
+      double max_search_distance,
+      double &distance) const
+  {
+    return dynamic_point_buffer_.getPredictedDistance(
+        snapshot, pos, query_time, max_search_distance, distance);
+  }
 
   // esdf
   template <typename F_get_val, typename F_set_val>
@@ -351,6 +367,7 @@ private:
   // TF2 — used by cloudOdomCallback to transform points at the exact scan timestamp
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+  plan_env::DynamicPointBuffer dynamic_point_buffer_;
 
   //
   uniform_real_distribution<double> rand_noise_;

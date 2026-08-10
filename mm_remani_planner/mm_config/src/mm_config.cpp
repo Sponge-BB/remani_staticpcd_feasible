@@ -732,6 +732,70 @@ bool MMConfig::checkManiDynamicObsCollision(Eigen::Vector3d car_state, Eigen::Ve
     return false;
 }
 
+bool MMConfig::checkCarPredictedDynamicObsCollision(
+    Eigen::Vector3d car_state, const ros::Time &query_time,
+    const plan_env::DynamicPointSnapshot &snapshot, bool safe,
+    double &min_dist, bool &query_valid){
+    std::vector<Eigen::Vector3d> car_pts;
+    getCarPts(car_state, car_pts);
+    const double safe_dist =
+        (safe ? mobile_base_check_radius_ + car_safe_margin_ :
+                mobile_base_check_radius_) + map_resolution_;
+    min_dist = safe_dist;
+    query_valid = true;
+    for(const auto &pt : car_pts){
+        double dist = safe_dist;
+        if(!grid_map_->getPredictedDynamicObstacleDistance(
+               snapshot, pt, query_time, safe_dist, dist)){
+            query_valid = false;
+            return false;
+        }
+        min_dist = std::min(min_dist, dist);
+        if(dist < safe_dist)
+            return true;
+    }
+    return false;
+}
+
+bool MMConfig::checkManiPredictedDynamicObsCollision(
+    Eigen::Vector3d car_state, Eigen::VectorXd mani_state,
+    const ros::Time &query_time,
+    const plan_env::DynamicPointSnapshot &snapshot, bool safe,
+    double &min_dist, bool &query_valid){
+    Eigen::Matrix4d T_q = Eigen::Matrix4d::Identity();
+    T_q(0, 0) = cos(car_state(2));
+    T_q(0, 1) = -sin(car_state(2));
+    T_q(0, 3) = car_state(0);
+    T_q(1, 0) = sin(car_state(2));
+    T_q(1, 1) = cos(car_state(2));
+    T_q(1, 3) = car_state(1);
+    const double safe_dist = safe ? manipulator_thickness_ + mani_safe_margin_ :
+                                    manipulator_thickness_;
+    min_dist = safe_dist;
+    query_valid = true;
+    Eigen::Matrix4d T_now = T_q * T_q_0_;
+    std::vector<Eigen::Matrix4d> T_joint, T_joint_grad_nouse;
+    getJointTrans(mani_state, T_joint, T_joint_grad_nouse);
+    for(int i = 0; i < manipulator_dof_; ++i){
+        T_now = T_now * T_joint[i];
+        const int pts_size = manipulator_link_pts_[i].cols();
+        for(int j = 0; j < pts_size; ++j){
+            const Eigen::Vector3d pt_on_link =
+                (T_now * manipulator_link_pts_[i].col(j)).head(3);
+            double dist = safe_dist;
+            if(!grid_map_->getPredictedDynamicObstacleDistance(
+                   snapshot, pt_on_link, query_time, safe_dist, dist)){
+                query_valid = false;
+                return false;
+            }
+            min_dist = std::min(min_dist, dist);
+            if(dist < safe_dist)
+                return true;
+        }
+    }
+    return false;
+}
+
 bool MMConfig::checkCarManiCollision(Eigen::VectorXd mani_state, bool safe, double &min_dist){
     double safe_dist = safe ? mobile_base_check_radius_ + manipulator_thickness_ + self_safe_margin_ : mobile_base_check_radius_ + manipulator_thickness_;
     std::vector<Eigen::Vector3d> car_pts;
@@ -828,6 +892,32 @@ bool MMConfig::checkDynamicObstacleCollision(Eigen::Vector3d car_state, Eigen::V
         return true;
     }
     if(checkManiDynamicObsCollision(car_state, mani_state, safe, min_dist)){
+        coll_type = 1;
+        return true;
+    }
+    coll_type = -1;
+    return false;
+}
+
+bool MMConfig::checkPredictedDynamicObstacleCollision(
+    Eigen::Vector3d car_state, Eigen::VectorXd mani_state,
+    const ros::Time &query_time,
+    const plan_env::DynamicPointSnapshot &snapshot, bool safe,
+    int &coll_type, bool &query_valid){
+    double min_dist;
+    query_valid = true;
+    if(checkCarPredictedDynamicObsCollision(
+           car_state, query_time, snapshot, safe, min_dist, query_valid)){
+        coll_type = 0;
+        return true;
+    }
+    if(!query_valid){
+        coll_type = -1;
+        return false;
+    }
+    if(checkManiPredictedDynamicObsCollision(
+           car_state, mani_state, query_time, snapshot, safe,
+           min_dist, query_valid)){
         coll_type = 1;
         return true;
     }

@@ -95,6 +95,8 @@ namespace remani_planner
     double goal_yaw_alignment_timeout_;
     double actual_state_collision_check_interval_;
     double actual_base_emergency_margin_;
+    bool dynamic_point_flow_shadow_mode_;
+    double dynamic_point_flow_shadow_check_interval_;
     double global_plan_dynamic_lookahead_time_;
     double global_plan_dynamic_check_interval_;
     double global_plan_dynamic_check_time_step_;
@@ -178,6 +180,7 @@ namespace remani_planner
 
     ros::Time t_last_Astar_;
     ros::Time last_global_plan_dynamic_check_time_;
+    ros::Time last_dynamic_point_flow_shadow_check_time_;
     ros::Time last_actual_state_collision_check_time_;
     ros::Time last_dynamic_collision_time_;
     ros::Time last_dynamic_seen_time_;
@@ -232,6 +235,8 @@ namespace remani_planner
     double getCurrentTrajectoryScale(const SingulTrajData &traj, const ros::Time &now) const;
     bool validateStaticTrajectory(const SingulTrajData &traj, int &coll_type) const;
     bool validateDynamicTrajectory(const SingulTrajData &traj, int &coll_type) const;
+    void runDynamicPointFlowShadowCheck(
+        const SingulTrajData &traj, double t_cur, const ros::Time &now);
     bool isRearDistantGoal() const;
     bool planNextWaypoint(const Eigen::VectorXd next_wp, const double nect_yaw);
     void waypointCallback(const geometry_msgs::PoseStamped::ConstPtr &msg);

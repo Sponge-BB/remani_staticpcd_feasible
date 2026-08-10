@@ -490,6 +490,31 @@ namespace remani_planner
                                                      pos.tail(manipulator_dof_), false, coll_type);
   }
 
+  bool PolyTrajOptimizer::checkPredictedDynamicObstacleCollision(
+      const SingulTrajData &traj, double t,
+      const plan_env::DynamicPointSnapshot &snapshot,
+      int &coll_type, bool &query_valid)
+  {
+    ros::Time query_time;
+    query_time.fromSec(traj.start_time + t);
+    return checkPredictedDynamicObstacleCollision(
+        traj, t, query_time, snapshot, coll_type, query_valid);
+  }
+
+  bool PolyTrajOptimizer::checkPredictedDynamicObstacleCollision(
+      const SingulTrajData &traj, double t,
+      const ros::Time &query_time,
+      const plan_env::DynamicPointSnapshot &snapshot,
+      int &coll_type, bool &query_valid)
+  {
+    Eigen::VectorXd pos = traj.getPos(t);
+    double yaw = traj.getCarAngle(t);
+    return mm_config_->checkPredictedDynamicObstacleCollision(
+        Eigen::Vector3d(pos(0), pos(1), yaw),
+        pos.tail(manipulator_dof_), query_time, snapshot, false,
+        coll_type, query_valid);
+  }
+
   /* callbacks by the L-BFGS optimizer */
   double PolyTrajOptimizer::costFunctionCallback(void *instance,
                                        const Eigen::VectorXd &x,

@@ -4,6 +4,15 @@
 
   <arg name="exp_param_file" value="$(find remani_planner)/config/exp3_param.yaml"/>
 
+  <!-- Enable the new velocity-aware predictor in observation-only mode for
+       this dynamic-obstacle experiment. It cannot command, stop, or replan. -->
+  <param name="/remani_planner_node/dynamic_point_flow/enable" value="true"/>
+  <param name="/remani_planner_node/dynamic_point_flow/shadow_mode" value="true"/>
+  <param name="/remani_planner_node/dynamic_point_flow/topic" value="/dynamic_points"/>
+  <param name="/remani_planner_node/dynamic_point_flow/max_age" value="0.35"/>
+  <param name="/remani_planner_node/dynamic_point_flow/max_prediction_time" value="2.5"/>
+  <param name="/remani_planner_node/dynamic_point_flow/max_points" value="800"/>
+
   <!-- start simulator and map generator using exp3 params -->
   <!-- pass reduced obstacle counts to the included run_in_sim.launch args -->
   <include file="$(find remani_planner)/launch/run_in_sim.launch">
@@ -26,6 +35,7 @@
     <param name="pub_rate" value="5.0"/>
     <!-- sampling resolution for boxes (m) -->
     <param name="box_resolution" value="0.05"/>
+    <param name="dynamic_points_topic" value="/dynamic_points"/>
   </node>
 
   <node name="rviz" pkg="rviz" type="rviz" args="-d $(find remani_planner)/launch/exp1.rviz"/>
