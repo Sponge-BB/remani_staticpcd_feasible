@@ -24,14 +24,6 @@ search:
   search_vis_stride : 1      # Publish one marker point every N expanded nodes
   search_vis_max_points: 3000 # Cap RViz search markers to avoid heavy debug load
   search_vis_publish_interval: 50 # Refresh RViz after this many recorded nodes
-  # Rear distant goals may reverse briefly to create turning room, then must
-  # switch to forward travel instead of following a long blind reverse route.
-  rear_goal_forward_only_distance: 0.50
-  rear_goal_forward_only_cos: -0.20
-  rear_goal_max_reverse_distance: 0.65
-  rear_goal_reverse_activation_forward_distance: 0.15
-  rear_goal_max_gear_switches: 1
-
   # manipulator sample
   goal_rate: 0.4             # Probability for RRT to sample the end point
   max_loop_num: 5000         # Maximum number of RRT sampling times
@@ -95,18 +87,26 @@ fsm:
   goal_yaw_alignment_timeout: 8.0
   actual_state_collision_check_interval: 0.05
   actual_base_emergency_margin: 0.01
+  esdf_freshness_wait_timeout: 0.75  # monotonic watchdog; timeout requests sync fallback but never releases stale planning
+  # Dynamic topology repair is deliberately shorter than the global route.
+  # Disable this switch for an immediate rollback to the legacy full-route A*.
+  dynamic_local_replan_enable: true
+  dynamic_replan_hold_arm: true
+  dynamic_replan_horizon: 2.0
+  dynamic_replan_handoff_time: 0.30
+  dynamic_astar_search_time: 0.45
+  dynamic_astar_replan_wall_time: 0.60
   global_plan_dynamic_lookahead_distance: 2.0
   global_plan_dynamic_far_sample_distance: 0.10
   global_plan_dynamic_immediate_confirm_distance: 1.0
   global_plan_dynamic_confirm_frames: 2
   global_plan_dynamic_confirm_timeout: 0.60
   global_plan_dynamic_clear_hold_time: 0.80
-  global_plan_dynamic_replan_hold_time: 3.00
+  # Debounce only repeated checks from the same live-map generation. A newer
+  # observation that invalidates the published candidate bypasses this hold.
+  global_plan_dynamic_replan_hold_time: 0.35
   global_plan_dynamic_same_obstacle_radius: 0.45
   # First deform the old trajectory briefly, then enter A* without a long blind wait.
-  global_plan_dynamic_retry_interval: 0.10
-  global_plan_dynamic_fast_replan_wall_time: 0.60
-  global_plan_dynamic_max_replans_per_event: 2
   global_plan_dynamic_slowdown_distance: 2.0
   global_plan_dynamic_slowdown_min_speed: 0.08
   global_plan_dynamic_slowdown_max_speed: 0.20
@@ -131,5 +131,34 @@ grid_map:
   use_load_map: false     # Whether to use simulation map
   use_global_map: true # Whether to use global map
   dynamic_static_match_radius: 0.075
+  # Missing returns are unknown. Only actual free rays clear live occupancy.
   visualization_interval: 0.10
   esdf_visualization_stride: 1
+  # Bound map-internal data parallelism so the planner shortens each blocking
+  # map update without consuming every CPU core needed by control/perception.
+  parallel_threads: 3
+  parallel_voxel_threshold: 50000
+  enable_performance_diagnostics: true
+  occupancy_warn_ms: 50.0
+  esdf_warn_ms: 50.0
+  performance_log_interval: 5.0
+  # Live/local ESDF is computed from an immutable occupancy snapshot outside
+  # the default ROS callback queue. Set false for an immediate baseline rollback.
+  async_esdf_enable: true
+  async_esdf_max_result_age: 0.75
+  # A static PCD supplies global geometry, but it is not evidence that the
+  # live LiDAR/occupancy chain is healthy. A scan older than these deadlines is
+  # never fused. Loss of fresh, finite, transformable live input trips the
+  # existing planner perception-stop input after the startup grace period;
+  # ground/self-filtered frames refresh health without clearing occupancy.
+  live_lidar_health_monitor_enable: true
+  live_lidar_pending_max_age: 0.35
+  live_lidar_message_max_age: 0.50
+  live_lidar_future_tolerance: 0.05
+  live_lidar_timeout: 0.75
+  live_lidar_startup_grace: 5.0
+
+dynamic_point_flow:
+  # Runtime rollback switch: false returns prediction callbacks to the legacy
+  # single ROS queue without reverting or rebuilding code.
+  isolated_worker_enable: true

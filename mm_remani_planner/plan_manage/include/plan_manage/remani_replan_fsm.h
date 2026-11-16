@@ -6,14 +6,19 @@
 #include <algorithm>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <nav_msgs/Path.h>
 #include <sensor_msgs/Imu.h>
 #include <ros/ros.h>
+#include <ros/callback_queue.h>
+#include <memory>
 #include <ros/package.h>
 #include <std_msgs/Empty.h>
 #include <std_msgs/Bool.h>
 #include <std_msgs/Float64.h>
+#include <std_msgs/Float64MultiArray.h>
 #include <std_msgs/Int32.h>
+#include <utility>
 #include <vector>
 #include <visualization_msgs/Marker.h>
 
@@ -23,6 +28,8 @@
 #include <geometry_msgs/Vector3Stamped.h>
 #include <traj_utils/DataDisp.h>
 #include <plan_manage/planner_manager.h>
+#include <plan_manage/mppi_refresh_event.hpp>
+#include <plan_manage/moving_handoff_timing.hpp>
 #include <plan_manage/planning_visualization.h>
 #include <quadrotor_msgs/PolynomialTraj.h>
 #include <traj_utils/Assignment.h>
@@ -65,6 +72,27 @@ namespace remani_planner
       MANUAL_TARGET = 1,
       PRESET_TARGET = 2
     };
+
+    enum class DYNAMIC_POINT_FLOW_EVAL_STATUS
+    {
+      NOT_DUE,
+      UNAVAILABLE,
+      CLEAR,
+      COLLISION
+    };
+
+    struct DynamicPointFlowEvaluation
+    {
+      DYNAMIC_POINT_FLOW_EVAL_STATUS status =
+          DYNAMIC_POINT_FLOW_EVAL_STATUS::NOT_DUE;
+      plan_env::DynamicPointSnapshot snapshot;
+      int collision_type = -1;
+      double trajectory_time = std::numeric_limits<double>::infinity();
+      double wall_time_ahead = std::numeric_limits<double>::infinity();
+      double path_distance = std::numeric_limits<double>::infinity();
+      Eigen::Vector2d trajectory_position = Eigen::Vector2d::Zero();
+      std::string reason;
+    };
     
     /* planning utils */
     MMPlannerManager::Ptr planner_manager_;
@@ -84,6 +112,16 @@ namespace remani_planner
     double planning_horizen_;
     double emergency_time_;
     bool enable_fail_safe_;
+    // Shared transient perception/live-occupancy stop owner. A newly checked
+    // candidate, never a retry count or an empty old path, releases this stop.
+    bool perception_recovery_pending_ = false;
+    bool perception_recovery_candidate_ready_ = false;
+    bool transient_obstacle_recovery_ = false;
+    std::pair<std::uint64_t, std::uint64_t> recovery_last_attempt_map_{0, 0};
+    std::uint64_t accepted_goal_revision_ = 0;
+    std::uint64_t recovery_candidate_goal_revision_ = 0;
+    ros::Time perception_odom_stamp_, perception_joint_stamp_;
+    ros::SteadyTime perception_retry_after_;
     int last_end_id_;
     double replan_trajectory_time_;
     double replan_feedback_position_threshold_;
@@ -93,8 +131,32 @@ namespace remani_planner
     double goal_yaw_tolerance_;
     double goal_arm_tolerance_;
     double goal_yaw_alignment_timeout_;
+    bool mppi_terminal_control_ = false;
+    mppi_refresh::Event mppi_refresh_request_;
+    double mppi_goal_stamp_ = 0.0, mppi_consumed_goal_ = 0.0;
+    double mppi_consumed_episode_ = 0.0;
+    ros::SteadyTime mppi_refresh_attempt_;
+    bool goal_feedback_recheck_pending_ = false;
     double actual_state_collision_check_interval_;
     double actual_base_emergency_margin_;
+    double esdf_freshness_wait_timeout_;
+    bool dynamic_local_replan_enable_;
+    bool dynamic_replan_hold_arm_;
+    double dynamic_replan_horizon_;
+    double dynamic_replan_handoff_time_;
+    double dynamic_astar_search_time_;
+    double dynamic_astar_replan_wall_time_;
+    bool dynamic_point_flow_shadow_mode_;
+    double dynamic_point_flow_shadow_check_interval_;
+    bool dynamic_point_flow_active_mode_;
+    bool dynamic_point_flow_active_replan_;
+    bool dynamic_point_flow_fail_safe_on_unavailable_;
+    int dynamic_point_flow_active_confirm_frames_;
+    double dynamic_point_flow_active_immediate_ttc_;
+    double dynamic_point_flow_active_emergency_ttc_;
+    double dynamic_point_flow_active_slowdown_ttc_;
+    double dynamic_point_flow_active_clear_hold_time_;
+    double dynamic_point_flow_active_resume_scale_;
     double global_plan_dynamic_lookahead_time_;
     double global_plan_dynamic_check_interval_;
     double global_plan_dynamic_check_time_step_;
@@ -107,9 +169,6 @@ namespace remani_planner
     double global_plan_dynamic_clear_hold_time_;
     double global_plan_dynamic_replan_hold_time_;
     double global_plan_dynamic_same_obstacle_radius_;
-    double global_plan_dynamic_retry_interval_;
-    double global_plan_dynamic_fast_replan_wall_time_;
-    int global_plan_dynamic_max_replans_per_event_;
     double global_plan_dynamic_slowdown_distance_;
     double global_plan_dynamic_slowdown_min_speed_;
     double global_plan_dynamic_slowdown_max_speed_;
@@ -167,54 +226,127 @@ namespace remani_planner
     bool try_plan_after_emergency_;
 
     /* ROS utils */
+    // Pumped only on the existing FSM thread, never by an AsyncSpinner. Keep
+    // this queue alive until its subscriptions/NodeHandle have been destroyed.
+    ros::CallbackQueue feedback_callback_queue_;
+    std::unique_ptr<ros::NodeHandle> feedback_node_;
     ros::NodeHandle node_;
     ros::Timer exec_timer_, safety_timer_;
     ros::Subscriber waypoint_sub_, odom_sub_, joint_state_sub_, gripper_state_sub_, trigger_sub_, assignment_sub_;
     ros::Subscriber trajectory_progress_sub_, tracking_fault_sub_;
+    ros::Subscriber mppi_refresh_sub_;
     ros::Publisher replan_pub_, new_pub_, poly_traj_pub_, data_disp_pub_, gripper_cmd_pub_, map_state_pub_;
     ros::Publisher safety_speed_limit_pub_;
+    ros::Publisher dynamic_point_flow_state_pub_;
+    ros::Publisher dynamic_point_flow_ttc_pub_;
 
     ros::Publisher reached_pub_, start_pub_;
 
     ros::Time t_last_Astar_;
     ros::Time last_global_plan_dynamic_check_time_;
+    ros::Time last_dynamic_point_flow_shadow_check_time_;
     ros::Time last_actual_state_collision_check_time_;
     ros::Time last_dynamic_collision_time_;
     ros::Time last_dynamic_seen_time_;
     ros::Time dynamic_replan_hold_until_;
     ros::Time next_dynamic_replan_retry_time_;
     std::uint64_t last_dynamic_observation_seq_;
+    // Raw live-map generation against which the currently published
+    // trajectory was last validated. A collision from a newer generation is
+    // new evidence and must not be hidden by the old event's debounce hold.
+    std::uint64_t last_published_dynamic_validation_seq_;
+    // Prediction generation used to validate the trajectory most recently
+    // sent to the controller. A newer point-flow generation which still
+    // intersects that trajectory is new evidence and bypasses time debounce.
+    std::uint64_t last_published_point_flow_validation_seq_;
+    std::uint64_t dynamic_event_required_esdf_seq_;
+    // Frozen only while a non-collision planning entry waits for ESDF. Keep
+    // this separate from the immutable raw-obstacle event generation.
+    std::uint64_t planning_boundary_required_esdf_seq_;
+    ros::SteadyTime dynamic_esdf_wait_start_;
+    bool dynamic_esdf_sync_fallback_requested_;
     int dynamic_collision_confirm_count_;
     double current_safety_speed_limit_;
     Eigen::Vector2d last_dynamic_confirmation_pos_;
     Eigen::Vector2d last_dynamic_replan_collision_pos_;
     int last_dynamic_replan_collision_type_;
+    bool last_dynamic_replan_collision_from_point_flow_;
     bool has_last_dynamic_confirmation_pos_;
     bool has_last_dynamic_replan_collision_;
     bool dynamic_safety_speed_limit_active_;
     bool dynamic_replan_retry_pending_;
-    bool dynamic_event_fast_replan_attempted_;
     bool dynamic_event_astar_attempted_;
+    bool dynamic_event_from_point_flow_;
+    bool dynamic_point_flow_collision_present_;
+    bool dynamic_point_flow_hazard_active_;
+    bool dynamic_point_flow_collision_confirmed_;
+    bool dynamic_point_flow_input_unavailable_;
     bool have_controller_progress_;
     bool tracking_fault_active_;
+    // A tracker stop is an independent safety owner.  It must not be folded
+    // into the dynamic-obstacle guard: doing so can leave the latched speed
+    // limit at zero when no dynamic observation ever existed.
+    bool tracking_safety_stop_active_;
+    bool tracking_recovery_pending_;
+    bool tracking_recovery_candidate_published_;
+    // The planner mutates traj_container_ while constructing a candidate.
+    // Keep an independent copy of what was actually sent to the controller so
+    // a rejected/failed candidate can never replace the safety-check basis.
+    bool have_published_trajectory_;
+    SingulTrajData last_published_trajectory_;
     double controller_trajectory_start_time_;
     double controller_trajectory_time_;
     double controller_trajectory_scale_;
     ros::Time controller_progress_stamp_;
     ros::Time goal_yaw_alignment_start_time_;
     int dynamic_event_replan_attempts_;
+    std::uint64_t last_dynamic_replan_attempt_generation_;
+    int dynamic_point_flow_confirm_count_;
+    std::uint64_t last_dynamic_point_flow_sequence_;
+    ros::Time last_dynamic_point_flow_collision_time_;
+    ros::Time dynamic_point_flow_clear_since_;
+    ros::SteadyTime dynamic_event_first_detected_steady_;
+    Eigen::Vector2d last_dynamic_point_flow_collision_position_;
+    DynamicPointFlowEvaluation last_dynamic_point_flow_evaluation_;
 
     int map_state_;
 
     std::vector<double> init_time_list_;
     std::vector<double> opt_time_list_;
     std::vector<double> total_time_list_;
+    // Local to one synchronous moving repair; never retained as a new
+    // execution owner. The old published curve survives candidate generation.
+    struct MovingHandoff {
+      moving_handoff::Timing timing;
+      SingulTrajData executing;
+      Eigen::VectorXd position_offset;
+      double yaw_offset = 0.0;
+    };
+
     /* helper functions */
-    bool callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj);           // front-end and back-end method
+    bool callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj,
+                           bool dynamic_repair = false,
+                           const MovingHandoff *handoff = nullptr); // front-end and back-end method
     bool callEmergencyStop(Eigen::VectorXd stop_pos, double stop_yaw, const int singul); // front-end and back-end method
+    bool perceptionRecoveryReady() const;
+    bool tryMppiRefresh();
+    bool goalTerminalFeedbackReady() const;
+    bool waitForGoalTerminal(const ros::Time &now, double position_error,
+                             double yaw_error, double arm_error);
+    void finishManualGoal();
+    void beginTransientObstacleRecovery();
+    void recoverPerceptionStop();
+    void finishNewTrajectory();
+    bool validateTrajectoryForPublication(SingulTrajData &candidate,
+        std::uint64_t &validation_seq, std::uint64_t &prediction_validation_seq,
+        const MovingHandoff *handoff = nullptr);
+    bool validateMovingHandoffBridge(const MovingHandoff &handoff,
+        const ros::Time &now, const plan_env::DynamicPointSnapshot *snapshot,
+        int &coll_type) const;
     bool planFromGlobalTraj(const int trial_times = 1);
     bool planFromLocalTraj(bool flag_use_poly_init, bool allow_random_retry = true,
-                           double optimization_wall_time = -1.0);
+                           double optimization_wall_time = -1.0,
+                           bool dynamic_repair = false);
     
     /* return value: std::pair< Times of the same state be continuously called, current continuously called state > */
     void changeFSMExecState(FSM_EXEC_STATE new_state, string pos_call);
@@ -227,20 +359,44 @@ namespace remani_planner
     void publishSafetySpeedLimit(double speed_limit);
     void applyDynamicSafetySpeedLimit(double speed_limit);
     void clearDynamicSafetySpeedLimit(const ros::Time &now, bool force = false);
-    void resetDynamicReplanEvent();
+    void latchDynamicEventRequiredESDFSeq(std::uint64_t observation_seq);
+    void raiseDynamicEventRequiredESDFSeq(std::uint64_t observation_seq);
+    bool waitForRequiredESDF(const char *planning_context,
+                             bool capture_planning_boundary = false);
+    bool hasUnmetRequiredESDF() const;
+    void resetDynamicReplanEvent(bool preserve_esdf_requirement = false);
+    void drainFeedbackCallbacks();
+    bool currentTrajectoryPhase(const SingulTrajData &traj, const ros::Time &now,
+                                double &phase, double &scale) const;
+    bool waitForControllerProgress(const SingulTrajData &traj,
+                                   const ros::Time &now) const;
     double getCurrentTrajectoryTime(const SingulTrajData &traj, const ros::Time &now) const;
     double getCurrentTrajectoryScale(const SingulTrajData &traj, const ros::Time &now) const;
     bool validateStaticTrajectory(const SingulTrajData &traj, int &coll_type) const;
     bool validateDynamicTrajectory(const SingulTrajData &traj, int &coll_type) const;
+    bool validatePredictedDynamicTrajectory(
+        const SingulTrajData &traj,
+        const plan_env::DynamicPointSnapshot &snapshot,
+        int &coll_type, bool moving_bridge_validated = false) const;
+    DynamicPointFlowEvaluation evaluateDynamicPointFlow(
+        const SingulTrajData &traj, double t_cur, const ros::Time &now);
+    void updateDynamicPointFlowDecision(
+        const DynamicPointFlowEvaluation &evaluation,
+        const ros::Time &now);
+    void publishDynamicPointFlowStatus(int state, double ttc);
+    void resetDynamicPointFlowDecision();
     bool isRearDistantGoal() const;
-    bool planNextWaypoint(const Eigen::VectorXd next_wp, const double nect_yaw);
+    bool planNextWaypoint(const Eigen::VectorXd next_wp, const double nect_yaw,
+                          bool preserve_active_target_on_failure = false);
     void waypointCallback(const geometry_msgs::PoseStamped::ConstPtr &msg);
     void mmCarOdomCallback(const nav_msgs::OdometryConstPtr &msg);
     void mmManiOdomCallback(const sensor_msgs::JointStateConstPtr &msg);
     void gripperCallback(const std_msgs::Bool::ConstPtr &msg);
     void trajectoryProgressCallback(const geometry_msgs::Vector3Stamped::ConstPtr &msg);
     void trackingFaultCallback(const std_msgs::Bool::ConstPtr &msg);
-    void sendPolyTrajROSMsg();
+    void mppiRefreshCallback(const std_msgs::Float64MultiArray::ConstPtr &msg);
+    void sendPolyTrajROSMsg(std::uint64_t validation_seq = 0,
+                           std::uint64_t prediction_validation_seq = 0);
     bool frontEndPathSearching();
     bool checkCollision();
 

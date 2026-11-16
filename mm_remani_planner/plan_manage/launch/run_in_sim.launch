@@ -14,6 +14,11 @@
     <arg name="generate_map_size_y" default="8"/>
     <arg name="generate_map_size_z" default="3"/>
     <arg name="exp_param_file" default="$(find remani_planner)/config/remani_planner_exp0.yaml"/>
+    <!-- Optional experiment overrides. Keep the original run_in_sim behavior
+         when callers do not provide them. -->
+    <arg name="map_obs_num" default="20"/>
+    <arg name="map_float_obs_num" default="30"/>
+    <arg name="cloud_topic" default="pcl_render_node/cloud"/>
 
     <!-- main algorithm params -->
     <include file="$(find remani_planner)/launch/advanced_param_sim.xml">
@@ -33,7 +38,7 @@
       <arg name="depth_topic" value="pcl_render_node/depth"/>
       <!-- topic of point cloud measurement, such as from LIDAR  -->
       <!-- don't set camera pose and depth, if you already set this one! -->
-      <arg name="cloud_topic" value="pcl_render_node/cloud"/>
+      <arg name="cloud_topic" value="$(arg cloud_topic)"/>
       <!-- intrinsic params of the depth camera -->
       <arg name="cx" value="321.04638671875"/>
       <arg name="cy" value="243.44969177246094"/>
@@ -65,8 +70,8 @@
         <param name="map/resolution" value="$(arg map_resolution)"/>    
         <param name="map/seed"    value="30"/>
         
-        <param name="map/obs_num"    value="20"/>
-        <param name="map/float_obs_num"    value="30"/>      
+        <param name="map/obs_num" value="$(arg map_obs_num)"/>
+        <param name="map/float_obs_num" value="$(arg map_float_obs_num)"/>
 
         <param name="ObstacleShape/radius_l" value="0.3"/>
         <param name="ObstacleShape/radius_h" value="0.5"/>        

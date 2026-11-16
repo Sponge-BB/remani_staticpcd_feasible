@@ -45,9 +45,6 @@ public:
   PathNode* parent;
   char node_state;
   int singul = 0;
-  double reverse_distance = 0.0;
-  double forward_distance = 0.0;
-  int gear_switches = 0;
   /* -------------------- */
   PathNode() {
     parent = NULL;
@@ -123,13 +120,6 @@ class KinoAstar{
     double traj_steer_penalty_;
     double traj_steer_change_penalty_;
     bool allow_reverse_;
-    bool require_forward_segment_;
-    double rear_goal_forward_only_distance_;
-    double rear_goal_forward_only_cos_;
-    double rear_goal_max_reverse_distance_;
-    double rear_goal_reverse_activation_forward_distance_;
-    int rear_goal_max_gear_switches_;
-    bool bounded_reverse_mode_;
     
     double oneshot_check_len_;
     double grid_interval_;
@@ -192,6 +182,10 @@ class KinoAstar{
     KinoAstar(){}
     ~KinoAstar();
     void setParam(ros::NodeHandle& nh, const std::shared_ptr<GridMap> &env, const std::shared_ptr<MMConfig> &mm_config);
+    inline double getMaxSearchTime() const { return max_search_time_; }
+    inline void setMaxSearchTime(double max_search_time) {
+      max_search_time_ = std::max(0.05, max_search_time);
+    }
     // void init();
     void reset();
     void visPath(std::vector<std::vector<Eigen::Vector3d>> path, bool pt);

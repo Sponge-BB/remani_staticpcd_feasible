@@ -13,6 +13,9 @@ find_package(catkin REQUIRED COMPONENTS
   roscpp
   rospy
   std_msgs
+  sensor_msgs
+  geometry_msgs
+  nav_msgs
   visualization_msgs
   cv_bridge
   message_filters
@@ -25,7 +28,7 @@ find_package(PCL 1.7 REQUIRED)
 catkin_package(
  INCLUDE_DIRS include
  LIBRARIES plan_env
- CATKIN_DEPENDS roscpp std_msgs
+ CATKIN_DEPENDS roscpp std_msgs sensor_msgs geometry_msgs nav_msgs visualization_msgs tf2_ros
 #  DEPENDS system_lib
 )
 
@@ -41,6 +44,8 @@ include_directories(
 link_directories(${PCL_LIBRARY_DIRS})
 
 add_library( plan_env 
+    src/dynamic_point_buffer.cpp
+    src/esdf_worker.cpp
     src/grid_map.cpp 
     src/raycast.cpp
     )
@@ -49,3 +54,29 @@ target_link_libraries( plan_env
     ${PCL_LIBRARIES}
     ${OpenCV_LIBRARIES}
     )  
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(test_dynamic_point_buffer
+    test/test_dynamic_point_buffer.cpp)
+  if(TARGET test_dynamic_point_buffer)
+    target_link_libraries(test_dynamic_point_buffer
+      plan_env
+      ${catkin_LIBRARIES})
+  endif()
+
+  catkin_add_gtest(test_grid_map_parallel
+    test/test_grid_map_parallel.cpp)
+  if(TARGET test_grid_map_parallel)
+    target_link_libraries(test_grid_map_parallel
+      plan_env
+      ${catkin_LIBRARIES})
+  endif()
+
+  catkin_add_gtest(test_esdf_worker
+    test/test_esdf_worker.cpp)
+  if(TARGET test_esdf_worker)
+    target_link_libraries(test_esdf_worker
+      plan_env
+      ${catkin_LIBRARIES})
+  endif()
+endif()

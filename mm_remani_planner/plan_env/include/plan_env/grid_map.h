@@ -3,27 +3,41 @@
 
 #include <Eigen/Eigen>
 #include <Eigen/StdVector>
+#include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cv_bridge/cv_bridge.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <random>
 #include <nav_msgs/Odometry.h>
 #include <queue>
 #include <ros/ros.h>
+#include <ros/callback_queue.h>
+#include <ros/spinner.h>
+#include <stdexcept>
 #include <tuple>
+#include <thread>
+#include <utility>
 #include <visualization_msgs/Marker.h>
+#include <visualization_msgs/MarkerArray.h>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <pcl/kdtree/kdtree_flann.h>
 #include <pcl_conversions/pcl_conversions.h>
 
 #include <message_filters/subscriber.h>
 #include <message_filters/sync_policies/approximate_time.h>
 #include <message_filters/sync_policies/exact_time.h>
 #include <message_filters/time_synchronizer.h>
+#include <sensor_msgs/point_cloud2_iterator.h>
 
 #include <plan_env/raycast.h>
+#include <plan_env/dynamic_point_buffer.h>
+#include <plan_env/esdf_worker.h>
 
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -68,6 +82,13 @@ struct MappingParameters
 
   /* time out */
   double odom_depth_timeout_;
+  bool live_lidar_health_monitor_enable_;
+  bool live_lidar_health_isolated_worker_;
+  double live_lidar_pending_max_age_;
+  double live_lidar_message_max_age_;
+  double live_lidar_future_tolerance_;
+  double live_lidar_timeout_;
+  double live_lidar_startup_grace_;
 
   /* depth image projection filtering */
   double depth_filter_maxdist_, depth_filter_mindist_, depth_filter_tolerance_;
@@ -89,6 +110,7 @@ struct MappingParameters
   double visualization_truncate_height_, virtual_ceil_height_, ground_height_, virtual_ceil_yp_, virtual_ceil_yn_;
   double visualization_interval_;
   int esdf_visualization_stride_;
+  bool enable_visualization_;
   bool show_occ_time_;
 
   /* active mapping */
@@ -98,6 +120,22 @@ struct MappingParameters
   double esdf_slice_height_;
   bool show_esdf_time_;
   double local_bound_inflate_;
+
+  /* bounded data parallelism and runtime diagnostics */
+  int parallel_threads_;
+  int parallel_voxel_threshold_;
+  bool enable_performance_diagnostics_;
+  double occupancy_warn_ms_;
+  double esdf_warn_ms_;
+  double performance_log_interval_;
+
+  /* optional asynchronous live ESDF pipeline */
+  bool async_esdf_enable_;
+  double async_esdf_max_result_age_;
+  // Maintain a globally consistent, truncated field by recomputing only
+  // changed occupancy and its finite influence neighbourhood.
+  bool incremental_esdf_ = false;
+  double esdf_distance_cap_ = 0.6;
 
   bool use_global_map_;
   bool fuse_global_map_;
@@ -110,6 +148,16 @@ struct MappingParameters
   double dynamic_static_match_radius_;
   bool self_filter_enable_;
   Eigen::Vector3d self_filter_min_, self_filter_max_;
+
+  /* velocity-aware planning overlay (disabled unless explicitly enabled) */
+  bool dynamic_point_overlay_enable_;
+  double dynamic_point_overlay_update_interval_;
+  double dynamic_point_overlay_horizon_;
+  double dynamic_point_overlay_time_step_;
+  double dynamic_point_overlay_extra_inflation_;
+  double dynamic_point_overlay_max_inflation_;
+  double dynamic_point_overlay_influence_distance_;
+  bool dynamic_point_isolated_worker_;
 };
 
 // intermediate mapping data for fusion
@@ -125,6 +173,16 @@ struct MappingData
   std::vector<unsigned char> static_miss_count_;
   ros::Time global_map_stamp_;
   bool global_esdf_pending_;
+  bool static_map_esdf_pending_;
+  bool static_map_esdf_ready_;
+  // A live scan has three explicit generation boundaries: accepted by the
+  // callback, fused into occupancy, and represented by the active ESDF.
+  // dynamic_observation_seq_ is the planner-facing coherent occupancy
+  // revision. It advances for every completed occupancy mutation, while the
+  // LiDAR counters retain accepted/pending/fused sensor diagnostics.
+  std::uint64_t lidar_accepted_seq_;
+  std::uint64_t lidar_pending_seq_;
+  std::uint64_t lidar_fused_seq_;
   std::uint64_t dynamic_observation_seq_;
   std::uint64_t esdf_observation_seq_;
 
@@ -162,6 +220,16 @@ struct MappingData
   ros::Time last_occ_update_time_;
   bool flag_depth_odom_timeout_;
   bool flag_use_depth_fusion;
+  ros::SteadyTime lidar_health_monitor_start_steady_;
+  // Heartbeat of a fresh, transformable LiDAR message containing at least one
+  // finite return. Ground/self-filtered frames prove sensor health without
+  // falsely clearing occupancy or advancing the fused generation.
+  ros::SteadyTime last_lidar_input_steady_;
+  ros::SteadyTime last_lidar_fused_steady_;
+  ros::SteadyTime pending_lidar_received_steady_;
+  ros::Time pending_lidar_stamp_;
+  std::uint64_t stale_lidar_discard_count_;
+  bool live_lidar_timeout_active_;
 
   // depth image projected point cloud
 
@@ -175,8 +243,12 @@ struct MappingData
   char raycast_num_;
   queue<Eigen::Vector3i> cache_voxel_;
 
-  // range of updating grid
-
+  // Two spatial generations must not share one mutable boundary.  The
+  // occupancy bounds describe only the voxels dirtied by the latest raycast;
+  // the local bounds describe the ESDF compute/query window.  In the fused
+  // global-map mode the latter is owned by the global/odometry policy and must
+  // never be overwritten by a LiDAR callback while an async job is running.
+  Eigen::Vector3i occupancy_bound_min_, occupancy_bound_max_;
   Eigen::Vector3i local_bound_min_, local_bound_max_;
 
   // computation time
@@ -187,6 +259,22 @@ struct MappingData
   // esdf map
   bool esdf_need_update_;
   double esdf_time_, max_esdf_time_;
+
+  /* wall-clock pipeline diagnostics (one writer: map callback queue) */
+  std::uint64_t occupancy_update_count_;
+  std::uint64_t esdf_update_count_;
+  std::uint64_t coalesced_cloud_count_;
+  std::uint64_t async_esdf_submitted_count_;
+  std::uint64_t async_esdf_committed_count_;
+  std::uint64_t async_esdf_rejected_count_;
+  std::uint64_t async_esdf_occupancy_deferred_count_;
+  double occupancy_wall_sum_ms_, occupancy_wall_max_ms_;
+  double esdf_wall_sum_ms_, esdf_wall_max_ms_;
+  double esdf_commit_wall_sum_ms_, esdf_commit_wall_max_ms_;
+  double async_esdf_snapshot_wall_sum_ms_;
+  double async_esdf_snapshot_wall_max_ms_;
+  double async_esdf_last_age_ms_;
+  ros::WallTime performance_window_start_;
 
   // LiDAR origin in world frame (for correct raycasting origin)
   Eigen::Vector3d lidar_origin_;
@@ -200,9 +288,54 @@ struct MappingData
 
 class GridMap
 {
+  struct OccupancySnapshot {
+    std::vector<double> occupancy;
+    std::vector<char> inflated, fixed;
+  };
+  struct ReadSnapshot {
+    std::shared_ptr<const OccupancySnapshot> occupancy;
+    std::shared_ptr<const std::vector<double>> distance;
+    std::uint64_t observation = 0, esdf = 0, accepted = 0, fused = 0;
+    std::uint64_t distance_revision = 0, epoch = 0;
+    bool static_ready = false, has_odom = false, has_depth = false, depth_fusion = false;
+    ros::Time last_occupancy;
+    ros::SteadyTime health_start, last_lidar;
+  };
 public:
   GridMap() {}
-  ~GridMap() {}
+  ~GridMap();
+
+  // Optional evidence from the same live-occupancy query; no shared last-hit state.
+  struct DynamicObstacleHit {
+    bool valid = false;
+    Eigen::Vector3i voxel = Eigen::Vector3i::Zero();
+    Eigen::Vector3d center = Eigen::Vector3d::Zero();
+    double distance = 0.0;
+    double occupancy = 0.0;
+    double occupancy_threshold = 0.0;
+  };
+
+  // One default-queue callback/solver reads a fixed generation. The map writer
+  // continues independently; refresh only at an explicit delivery boundary.
+  class ReadScope {
+    const GridMap *previous_map_;
+    std::shared_ptr<const ReadSnapshot> previous_;
+    bool previous_writer_read_, valid_ = true;
+  public:
+    enum Selection { Latest, Complete };
+    explicit ReadScope(const GridMap &map, Selection selection = Latest);
+    ~ReadScope();
+    bool valid() const { return valid_; }
+    ReadScope(const ReadScope &) = delete;
+    ReadScope &operator=(const ReadScope &) = delete;
+  };
+  void refreshReadSnapshot() const;
+  bool beginPlanningReadSnapshot() const;
+  bool hasReadSnapshots() const { return isolated_mapping_; }
+  void stopMapping();
+  ros::CallbackQueueInterface *mappingCallbackQueue() {
+    return isolated_mapping_ ? &mapping_queue_ : node_.getCallbackQueue();
+  }
 
   enum
   {
@@ -262,9 +395,100 @@ public:
   inline double getResolution();
   Eigen::Vector3d getOrigin();
   // int getVoxelNum();
-  bool getOdomDepthTimeout() { return md_.flag_depth_odom_timeout_; }
-  std::uint64_t getDynamicObservationSeq() const { return md_.dynamic_observation_seq_; }
-  std::uint64_t getESDFObservationSeq() const { return md_.esdf_observation_seq_; }
+  bool getOdomDepthTimeout() const { return sensorTimeoutNow(); }
+  bool mapReadyForPlanning() const
+  {
+    const auto view = readSnapshot();
+    const bool static_map_ready =
+        !mp_.use_global_map_ || !mp_.fuse_global_map_ ||
+        (view ? view->static_ready : md_.static_map_esdf_ready_);
+    const bool live_lidar_seen =
+        !mp_.live_lidar_health_monitor_enable_ ||
+        !(view ? view->last_lidar : md_.last_lidar_input_steady_).isZero();
+    return static_map_ready && live_lidar_seen && !sensorTimeoutNow();
+  }
+  std::uint64_t getDynamicObservationSeq() const { const auto v=readSnapshot(); return v ? v->observation : md_.dynamic_observation_seq_; }
+  std::uint64_t getESDFObservationSeq() const { const auto v=readSnapshot(); return v ? v->esdf : md_.esdf_observation_seq_; }
+  std::uint64_t getLidarAcceptedSeq() const { const auto v=readSnapshot(); return v ? v->accepted : md_.lidar_accepted_seq_; }
+  std::uint64_t getLidarFusedSeq() const { const auto v=readSnapshot(); return v ? v->fused : md_.lidar_fused_seq_; }
+  ros::Time getReadFusionTime() const { const auto v=readSnapshot(); return v ? v->last_occupancy : md_.last_occ_update_time_; }
+  std::pair<std::uint64_t, std::uint64_t> getReadESDFVersion() const {
+    const auto v = readSnapshot();
+    return v ? std::make_pair(v->epoch, v->distance_revision)
+             : std::make_pair(esdf_map_epoch_, read_distance_revision_);
+  }
+  /**
+   * Permanently select the serialized ESDF path for this process and request
+   * an update from the latest occupancy generation. This operation is
+   * idempotent and is intended for a safety watchdog, not normal scheduling.
+   */
+  void requestSynchronousESDFFallback();
+  bool dynamicPointFlowEnabled() const { return dynamic_point_buffer_.enabled(); }
+  double dynamicPointMaxPredictionTime() const
+  {
+    return dynamic_point_buffer_.maxPredictionTime();
+  }
+  bool dynamicPointPlanningOverlayEnabled() const
+  {
+    return mp_.dynamic_point_overlay_enable_;
+  }
+  bool refreshDynamicPointPlanningOverlay(
+      const plan_env::DynamicPointSnapshot &snapshot,
+      const ros::Time &now);
+  // Freeze one immutable swept-overlay generation for a synchronous planning
+  // attempt. The dynamic worker may keep receiving observations, but it cannot
+  // replace the KD-tree until endDynamicPointPlanningSnapshot().
+  bool beginDynamicPointPlanningSnapshot(
+      const plan_env::DynamicPointSnapshot &snapshot,
+      const ros::Time &now);
+  void endDynamicPointPlanningSnapshot();
+  bool dynamicPointPlanningOverlayReadyFor(
+      std::uint64_t minimum_sequence) const;
+  plan_env::DynamicPointSnapshot getDynamicPointSnapshot(const ros::Time &now) const
+  {
+    return dynamic_point_buffer_.getSnapshot(now);
+  }
+  bool getPredictedDynamicObstacleDistance(
+      const plan_env::DynamicPointSnapshot &snapshot,
+      const Eigen::Vector3d &pos,
+      const ros::Time &query_time,
+      double max_search_distance,
+      double &distance) const
+  {
+    return dynamic_point_buffer_.getPredictedDistance(
+        snapshot, pos, query_time, max_search_distance, distance);
+  }
+  bool getPredictedDynamicObstacleBounds(
+      const plan_env::DynamicPointSnapshot &snapshot,
+      const ros::Time &query_time,
+      Eigen::Vector3d &minimum,
+      Eigen::Vector3d &maximum,
+      bool &has_points) const
+  {
+    return dynamic_point_buffer_.getPredictedBounds(
+        snapshot, query_time, minimum, maximum, has_points);
+  }
+  bool getPredictedDynamicObstaclePositions(
+      const plan_env::DynamicPointSnapshot &snapshot,
+      const ros::Time &query_time,
+      plan_env::PredictedPositionVector &positions,
+      double &uncertainty) const
+  {
+    return dynamic_point_buffer_.getPredictedPositions(
+        snapshot, query_time, positions, uncertainty);
+  }
+
+  /**
+   * Query the short-horizon swept point-flow cloud used only by planning.
+   * The returned distance already subtracts the configured prediction
+   * uncertainty. False means that no fresh planning overlay is available.
+   */
+  bool getDynamicPointPlanningDistance(
+      const Eigen::Vector3d &pos, double max_search_distance,
+      double &distance, Eigen::Vector3d *gradient = nullptr) const;
+  double getPlanningDistance(const Eigen::Vector3d &pos, bool precise = false);
+  pair<double, Eigen::Vector3d> evaluatePlanningEDTWithGrad(
+      const Eigen::Vector3d &pos, double &dist, Eigen::Vector3d &grad);
 
   // esdf
   template <typename F_get_val, typename F_set_val>
@@ -273,8 +497,40 @@ public:
   void publishESDF();
   inline double getDistance(const Eigen::Vector3d& pos);
   inline double getDistance(const Eigen::Vector3i& id);
+  // Inclusive bounds, x-major with contiguous z rows. Uses one pinned read
+  // generation; invalid bounds/storage leave output unchanged (no clamping).
+  bool copyDistanceRegion(const Eigen::Vector3i& lo,
+                          const Eigen::Vector3i& hi,
+                          std::vector<double>& output) const;
+  // Diagnostic only: one shared snapshot lookup, avoiding per-voxel atomic
+  // shared_ptr traffic in the exporter. No occupancy or distance is mutated.
+  bool copyOccupancyEvidence(const Eigen::Vector3i& lo,
+                            const Eigen::Vector3i& hi,
+                            std::vector<unsigned char>& output) const {
+    const auto view = readSnapshot();
+    const auto size = mp_.map_voxel_num_;
+    if (!view || !view->occupancy || view->observation != view->esdf ||
+        (lo.array()<0).any() || (hi.array()>=size.array()).any() ||
+        (lo.array()>hi.array()).any()) return false;
+    const auto& raw = view->occupancy->occupancy;
+    const auto& inflated = view->occupancy->inflated;
+    if (raw.size()!=inflated.size() || raw.size()!=std::size_t(size.prod()))
+      return false;
+    output.resize(std::size_t((hi-lo+Eigen::Vector3i::Ones()).prod()));
+    std::size_t destination = 0;
+    for (int x=lo.x(); x<=hi.x(); ++x)
+      for (int y=lo.y(); y<=hi.y(); ++y) {
+        std::size_t source = (std::size_t(x)*size.y()+y)*size.z()+lo.z();
+        for (int z=lo.z(); z<=hi.z(); ++z,++source)
+          output[destination++] = (raw[source]>mp_.min_occupancy_log_ ? 1 : 0) |
+                                  (inflated[source]==1 ? 2 : 0);
+      }
+    return true;
+  }
   double getPreciseDistance(const Eigen::Vector3d& pos);
   double getDynamicObstacleDistance(const Eigen::Vector3d& pos, double max_search_distance);
+  double getDynamicObstacleDistance(const Eigen::Vector3d& pos, double max_search_distance,
+                                    DynamicObstacleHit *hit);
   void getSurroundPts(const Eigen::Vector3d& pos, Eigen::Vector3d pts[2][2][2], Eigen::Vector3d& diff);
   void getSurroundDistance(Eigen::Vector3d pts[2][2][2], double dists[2][2][2]);
   void interpolateTrilinearEDT(double values[2][2][2], const Eigen::Vector3d& diff, double& value);
@@ -292,8 +548,24 @@ public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
 private:
+  friend class GridMapParallelTestAccessor;
+
   MappingParameters mp_;
   MappingData md_;
+  // Only this queue mutates occupancy/ESDF. No solver holds a writer lock.
+  bool isolated_mapping_ = false;
+  ros::CallbackQueue mapping_queue_;
+  std::thread mapping_thread_;
+  std::atomic<bool> mapping_stop_{false}, synchronous_fallback_requested_{false};
+  std::shared_ptr<const ReadSnapshot> latest_read_snapshot_;
+  std::shared_ptr<const ReadSnapshot> latest_complete_snapshot_;
+  std::uint64_t read_distance_revision_ = 0;
+  static thread_local const GridMap *writer_context_, *reader_context_;
+  static thread_local std::shared_ptr<const ReadSnapshot> reader_snapshot_;
+  static thread_local bool reader_on_writer_;
+  std::shared_ptr<const ReadSnapshot> readSnapshot() const;
+  void publishReadSnapshot();
+  void mappingLoop();
 
   // get depth image and camera pose
   void depthPoseCallback(const sensor_msgs::ImageConstPtr &img,
@@ -301,6 +573,10 @@ private:
   void extrinsicCallback(const nav_msgs::OdometryConstPtr &odom);
   void depthOdomCallback(const sensor_msgs::ImageConstPtr &img, const nav_msgs::OdometryConstPtr &odom);
   void cloudOdomCallback(const sensor_msgs::PointCloud2ConstPtr &cloud, const nav_msgs::OdometryConstPtr &odom);
+  void liveLidarHealthCallback(
+      const sensor_msgs::PointCloud2ConstPtr &cloud);
+  void liveLidarHealthOdomCallback(
+      const nav_msgs::OdometryConstPtr &odom);
   void cloudCallback(const sensor_msgs::PointCloud2ConstPtr &img);
   void odomCallback(const nav_msgs::OdometryConstPtr &odom);
 
@@ -308,14 +584,35 @@ private:
   void updateOccupancyCallback(const ros::TimerEvent & /*event*/);
   void visCallback(const ros::TimerEvent & /*event*/);
   void updateESDFCallback(const ros::TimerEvent& /*event*/);
+  void updateDynamicPointOverlayCallback(const ros::TimerEvent& /*event*/);
 
   // main update process
   void projectDepthImage();
-  void raycastProcess();
+  void raycastProcess(bool live_lidar_observation = false);
   void clearAndInflateLocalMap();
   void clearStaticGlobalMap();
   int clearStaticOccupancyAround(const Eigen::Vector3i &center, int clear_step);
   void updateLocalBoundsAroundRobot(bool force_esdf_update = false);
+  void noteLidarHealthMonitorStart();
+  void updateSensorTimeoutState();
+  bool sensorTimeoutNow() const;
+  bool liveLidarMessageStampFresh(const ros::Time &stamp,
+                                  const char *source) const;
+  ros::SteadyTime latestLiveLidarHealthTime() const;
+  bool hasPendingLidarObservation() const;
+  void clearPendingLidarObservation();
+  void maybeLogPerformanceDiagnostics();
+  bool fusedGlobalMapOwnsESDFBounds() const;
+  bool validOccupancyBounds() const;
+  bool validESDFBounds() const;
+  bool asyncESDFUpdateOutstanding() const;
+  bool submitAsyncESDFUpdate();
+  void commitAsyncESDFResult();
+  void invalidateAsyncESDFJobs();
+  void recordESDFTiming(double compute_ms, double commit_ms,
+                        double result_age_ms, bool asynchronous);
+  bool prepareIncrementalESDF();
+  void finishIncrementalESDF();
 
   inline void inflatePoint(const Eigen::Vector3i &pt, int step, vector<Eigen::Vector3i> &pts);
   int setCacheOccupancy(Eigen::Vector3d pos, int occ);
@@ -345,12 +642,66 @@ private:
   SynchronizerCloudOdom sync_cloud_odom_;
 
   ros::Subscriber indep_cloud_sub_, indep_odom_sub_, extrinsic_sub_;
-  ros::Publisher map_pub_, map_inf_pub_, esdf_pub_;
-  ros::Timer occ_timer_, vis_timer_, esdf_timer_;
+  ros::Publisher map_pub_, map_inf_pub_, esdf_pub_, dynamic_point_overlay_pub_;
+  ros::Publisher dynamic_prediction_nominal_pub_;
+  ros::Publisher dynamic_prediction_markers_pub_;
+  ros::Timer occ_timer_, vis_timer_, esdf_timer_, dynamic_point_overlay_timer_;
 
   // TF2 — used by cloudOdomCallback to transform points at the exact scan timestamp
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+
+  // A planning/optimization callback can occupy the legacy ROS queue for
+  // hundreds of milliseconds. This queue observes only LiDAR transport
+  // health, and never mutates occupancy, ESDF, or planner-visible map state.
+  // The map therefore keeps its single-writer invariant while the watchdog
+  // remains responsive during synchronous planning.
+  ros::CallbackQueue lidar_health_callback_queue_;
+  std::unique_ptr<ros::NodeHandle> lidar_health_node_;
+  std::unique_ptr<ros::AsyncSpinner> lidar_health_spinner_;
+  ros::Subscriber lidar_health_sub_, lidar_health_odom_sub_;
+  std::atomic<std::uint64_t> lidar_health_steady_ns_{0};
+  std::atomic<std::uint64_t> lidar_health_odom_steady_ns_{0};
+
+  // Dynamic prediction is isolated from the legacy map/FSM callback queue.
+  // Its shared products are immutable snapshots or mutex-protected overlays.
+  ros::CallbackQueue dynamic_callback_queue_;
+  std::unique_ptr<ros::NodeHandle> dynamic_node_;
+  std::unique_ptr<ros::AsyncSpinner> dynamic_spinner_;
+  plan_env::DynamicPointBuffer dynamic_point_buffer_;
+  mutable std::mutex dynamic_point_overlay_mutex_;
+  pcl::PointCloud<pcl::PointXYZ>::Ptr dynamic_point_overlay_cloud_;
+  mutable pcl::KdTreeFLANN<pcl::PointXYZ> dynamic_point_overlay_kdtree_;
+  // Radius aligned one-to-one with dynamic_point_overlay_cloud_. Unlike the
+  // old single worst-horizon radius, this preserves the uncertainty of each
+  // prediction time slice.
+  std::vector<float> dynamic_point_overlay_radii_;
+  double dynamic_point_overlay_inflation_ = 0.0;
+  Eigen::Vector3d dynamic_point_overlay_min_ = Eigen::Vector3d::Zero();
+  Eigen::Vector3d dynamic_point_overlay_max_ = Eigen::Vector3d::Zero();
+  std::uint64_t dynamic_point_overlay_sequence_ = 0;
+  ros::Time dynamic_point_overlay_refresh_time_;
+  bool dynamic_point_overlay_ready_ = false;
+  bool dynamic_point_overlay_frozen_ = false;
+  std::uint64_t dynamic_point_overlay_frozen_sequence_ = 0;
+
+  // Only live/local ESDF updates use this worker. Its private result is
+  // committed by the sole map writer, then published to immutable readers.
+  std::unique_ptr<plan_env::ESDFWorker> esdf_worker_;
+  std::uint64_t esdf_map_epoch_ = 1;
+  std::uint64_t esdf_next_request_id_ = 0;
+  std::uint64_t esdf_latest_submitted_request_id_ = 0;
+  // Unlike committed_request_id_, this advances for both accepted and
+  // rejected/cancelled results. It is the single-flight backpressure fence
+  // which prevents live occupancy from invalidating an in-flight snapshot.
+  std::uint64_t esdf_last_resolved_request_id_ = 0;
+  std::uint64_t esdf_committed_request_id_ = 0;
+  bool async_esdf_fallback_to_sync_ = false;
+  std::vector<char> esdf_committed_occupancy_;
+  std::uint64_t esdf_occupancy_epoch_ = 0;
+  Eigen::Vector3i esdf_write_min_ = Eigen::Vector3i::Zero();
+  Eigen::Vector3i esdf_write_max_ = Eigen::Vector3i::Constant(-1);
+  bool incremental_patch_ready_ = false;
 
   //
   uniform_real_distribution<double> rand_noise_;
@@ -395,9 +746,10 @@ inline void GridMap::boundIndex(Eigen::Vector2i &id)
 
 inline bool GridMap::isUnknown(const Eigen::Vector3i &id)
 {
+  const auto view = readSnapshot();
   Eigen::Vector3i id1 = id;
   boundIndex(id1);
-  return md_.occupancy_buffer_[toAddress(id1)] < mp_.clamp_min_log_ - 1e-3;
+  return (view ? view->occupancy->occupancy : md_.occupancy_buffer_)[toAddress(id1)] < mp_.clamp_min_log_ - 1e-3;
 }
 
 inline bool GridMap::isUnknown(const Eigen::Vector3d &pos)
@@ -409,26 +761,30 @@ inline bool GridMap::isUnknown(const Eigen::Vector3d &pos)
 
 inline bool GridMap::isKnownFree(const Eigen::Vector3i &id)
 {
+  const auto view = readSnapshot();
   Eigen::Vector3i id1 = id;
   boundIndex(id1);
   int adr = toAddress(id1);
 
   // return md_.occupancy_buffer_[adr] >= mp_.clamp_min_log_ &&
   //     md_.occupancy_buffer_[adr] < mp_.min_occupancy_log_;
-  return md_.occupancy_buffer_[adr] >= mp_.clamp_min_log_ && md_.occupancy_buffer_inflate_[adr] == 0;
+  return (view ? view->occupancy->occupancy : md_.occupancy_buffer_)[adr] >= mp_.clamp_min_log_ &&
+         (view ? view->occupancy->inflated : md_.occupancy_buffer_inflate_)[adr] == 0;
 }
 
 inline bool GridMap::isKnownOccupied(const Eigen::Vector3i &id)
 {
+  const auto view = readSnapshot();
   Eigen::Vector3i id1 = id;
   boundIndex(id1);
   int adr = toAddress(id1);
 
-  return md_.occupancy_buffer_inflate_[adr] == 1;
+  return (view ? view->occupancy->inflated : md_.occupancy_buffer_inflate_)[adr] == 1;
 }
 
 inline bool GridMap::isKnownOccupied(const Eigen::Vector3d &pt)
 {
+  const auto view = readSnapshot();
   if(!isInMap(pt)){
     return true;
   }
@@ -437,7 +793,7 @@ inline bool GridMap::isKnownOccupied(const Eigen::Vector3d &pt)
   boundIndex(id1);
   int adr = toAddress(id1);
 
-  return md_.occupancy_buffer_inflate_[adr] == 1;
+  return (view ? view->occupancy->inflated : md_.occupancy_buffer_inflate_)[adr] == 1;
 }
 
 inline void GridMap::setOccupied(Eigen::Vector3d pos)
@@ -497,33 +853,36 @@ inline bool GridMap::getAstarData(const Eigen::Vector2d &pos, Eigen::Vector2d &n
 
 inline int GridMap::getOccupancy(Eigen::Vector3d pos)
 {
+  const auto view = readSnapshot();
   if (!isInMap(pos))
     return -1;
 
   Eigen::Vector3i id;
   posToIndex(pos, id);
 
-  return md_.occupancy_buffer_[toAddress(id)] > mp_.min_occupancy_log_ ? 1 : 0;
+  return (view ? view->occupancy->occupancy : md_.occupancy_buffer_)[toAddress(id)] > mp_.min_occupancy_log_ ? 1 : 0;
 }
 
 inline int GridMap::getInflateOccupancy(Eigen::Vector3d pos)
 {
+  const auto view = readSnapshot();
   if (!isInMap(pos))
     return -1;
 
   Eigen::Vector3i id;
   posToIndex(pos, id);
 
-  return int(md_.occupancy_buffer_inflate_[toAddress(id)]);
+  return int((view ? view->occupancy->inflated : md_.occupancy_buffer_inflate_)[toAddress(id)]);
 }
 
 inline int GridMap::getOccupancy(Eigen::Vector3i id)
 {
+  const auto view = readSnapshot();
   if (id(0) < 0 || id(0) >= mp_.map_voxel_num_(0) || id(1) < 0 || id(1) >= mp_.map_voxel_num_(1) ||
       id(2) < 0 || id(2) >= mp_.map_voxel_num_(2))
     return -1;
 
-  return md_.occupancy_buffer_[toAddress(id)] > mp_.min_occupancy_log_ ? 1 : 0;
+  return (view ? view->occupancy->occupancy : md_.occupancy_buffer_)[toAddress(id)] > mp_.min_occupancy_log_ ? 1 : 0;
 }
 
 inline bool GridMap::isInMap(const Eigen::Vector3d &pos)
@@ -655,17 +1014,19 @@ inline void GridMap::inflatePoint(const Eigen::Vector3i &pt, int step, vector<Ei
 inline double GridMap::getResolution() { return mp_.resolution_; }
 
 inline double GridMap::getDistance(const Eigen::Vector3d& pos) {
+  const auto view = readSnapshot();
   Eigen::Vector3i id;
   posToIndex(pos, id);
   boundIndex(id);
 
-  return md_.distance_buffer_all_[toAddress(id)];
+  return (view ? *view->distance : md_.distance_buffer_all_)[toAddress(id)];
 }
 
 inline double GridMap::getDistance(const Eigen::Vector3i& id) {
+  const auto view = readSnapshot();
   Eigen::Vector3i id1 = id;
   boundIndex(id1);
-  return md_.distance_buffer_all_[toAddress(id1)];
+  return (view ? *view->distance : md_.distance_buffer_all_)[toAddress(id1)];
 }
 
 #endif

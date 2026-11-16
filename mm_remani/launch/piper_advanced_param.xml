@@ -12,6 +12,12 @@
 	<arg name="depth_topic"/>
 	<arg name="cloud_topic"/>
 	<arg name="exp_param_file"/>
+	<arg name="use_urdf_collision_b" default="false"/>
+	<arg name="enable_model_vis" default="true"/>
+	<arg name="enable_heavy_visualization" default="true"/>
+	<arg name="lidar_offset_x" default="0.28"/>
+	<arg name="lidar_offset_y" default="0.0"/>
+	<arg name="lidar_offset_z" default="0.002"/>
 
 	<arg name="cx"/>
 	<arg name="cy"/>
@@ -23,6 +29,8 @@
 		<rosparam file="$(arg exp_param_file)"/>
 		<rosparam file="$(find remani_planner)/config/piper_param.yaml"/>
 		<rosparam file="$(find remani_planner)/config/remani_planner_param.yaml"/>
+		<rosparam if="$(arg use_urdf_collision_b)" file="$(find remani_planner)/config/fixed_collision_spheres_b.yaml"/>
+		<param name="mm/fixed_collision_spheres_enable" value="$(arg use_urdf_collision_b)" type="bool"/>
 
 		<remap from="~gripper_cmd" to="$(arg gripper_cmd_topic)"/>
 		<remap from="~gripper_state" to="$(arg gripper_state_topic)"/>
@@ -38,11 +46,18 @@
 		<remap from="~grid_map/cloud" to="$(arg cloud_topic)"/>
 		<remap from="~grid_map/pose"  to = "$(arg camera_pose_topic)"/> 
 		<remap from="~grid_map/depth" to = "$(arg depth_topic)"/>
+		<param name="visualization/enable_heavy" value="$(arg enable_heavy_visualization)" type="bool"/>
 		
                 <!-- planning fsm -->
                 <param name="fsm/thresh_no_replan_meter"  value="1.0" type="double"/>
 	                <param name="fsm/thresh_replan_time"      value="2.5" type="double"/>
-	                <param name="fsm/replan_trajectory_time"  value="0.4" type="double"/>
+		                <param name="fsm/replan_trajectory_time"  value="0.4" type="double"/>
+		                <param name="fsm/dynamic_local_replan_enable" value="true" type="bool"/>
+		                <param name="fsm/dynamic_replan_hold_arm" value="true" type="bool"/>
+		                <param name="fsm/dynamic_replan_horizon" value="2.0" type="double"/>
+		                <param name="fsm/dynamic_replan_handoff_time" value="0.30" type="double"/>
+		                <param name="fsm/dynamic_astar_search_time" value="0.45" type="double"/>
+		                <param name="fsm/dynamic_astar_replan_wall_time" value="0.60" type="double"/>
 	                <param name="fsm/replan_feedback_position_threshold" value="0.08" type="double"/>
 	                <param name="fsm/replan_feedback_yaw_threshold" value="0.15" type="double"/>
 	                <param name="fsm/global_plan_dynamic_lookahead_distance" value="2.0" type="double"/>
@@ -51,9 +66,8 @@
 	                <param name="fsm/global_plan_dynamic_confirm_frames" value="2" type="int"/>
 	                <param name="fsm/global_plan_dynamic_confirm_timeout" value="0.60" type="double"/>
 	                <param name="fsm/global_plan_dynamic_clear_hold_time" value="0.40" type="double"/>
-	                <param name="fsm/global_plan_dynamic_replan_hold_time" value="0.60" type="double"/>
+		                <param name="fsm/global_plan_dynamic_replan_hold_time" value="0.35" type="double"/>
 	                <param name="fsm/global_plan_dynamic_same_obstacle_radius" value="0.45" type="double"/>
-	                <param name="fsm/global_plan_dynamic_retry_interval" value="0.30" type="double"/>
 	                <param name="fsm/global_plan_dynamic_slowdown_distance" value="2.0" type="double"/>
 	                <param name="fsm/global_plan_dynamic_slowdown_min_speed" value="0.08" type="double"/>
 	                <param name="fsm/global_plan_dynamic_slowdown_max_speed" value="0.20" type="double"/>
@@ -87,6 +101,11 @@
 		<param name="grid_map/self_filter_max_y"      value="0.55"/>
 		<param name="grid_map/self_filter_min_z"      value="-0.20"/>
 		<param name="grid_map/self_filter_max_z"      value="0.90"/>
+		<!-- Used only by GridMap's odometry fallback when an exact TF lookup
+		     is temporarily unavailable. Keep it identical to the real LiDAR TF. -->
+		<param name="grid_map/lidar_offset_x"          value="$(arg lidar_offset_x)"/>
+		<param name="grid_map/lidar_offset_y"          value="$(arg lidar_offset_y)"/>
+		<param name="grid_map/lidar_offset_z"          value="$(arg lidar_offset_z)"/>
 		<!-- camera parameter -->
 		<param name="grid_map/cx" value="$(arg cx)"/>
 		<param name="grid_map/cy" value="$(arg cy)"/>
@@ -113,6 +132,7 @@
 		<param name="grid_map/visualization_truncate_height"    value="2.8"/>
 		<param name="grid_map/visualization_interval"           value="0.20"/>
 		<param name="grid_map/esdf_visualization_stride"        value="2"/>
+		<param name="grid_map/enable_visualization"             value="$(arg enable_heavy_visualization)" type="bool"/>
 		<param name="grid_map/show_occ_time"                    value="false"/>
 		<param name="grid_map/pose_type"                        value="2"/>  <!-- 2=ODOMETRY for LiDAR sync -->  
 		<param name="grid_map/frame_id"                         value="world"/>
@@ -140,6 +160,8 @@
 		<rosparam file="$(arg exp_param_file)"/>
 		<rosparam file="$(find remani_planner)/config/piper_param.yaml"/>
 		<rosparam file="$(find remani_planner)/config/remani_planner_param.yaml"/>
+		<rosparam if="$(arg use_urdf_collision_b)" file="$(find remani_planner)/config/fixed_collision_spheres_b.yaml"/>
+		<param name="mm/fixed_collision_spheres_enable" value="$(arg use_urdf_collision_b)" type="bool"/>
   
 		<remap from="~odom" to="$(arg odometry_topic)"/>
 		<remap from="~joint_states" to="$(arg joint_state_topic)"/>
@@ -149,8 +171,10 @@
 		<remap from="~planning/finish" to = "planning/finish"/>
   	</node>
 
-        <node pkg="fake_mm" name="model_vis" type="model_vis" output="screen">
+	<node if="$(arg enable_model_vis)" pkg="fake_mm" name="model_vis" type="model_vis" output="screen">
                 <rosparam file="$(find remani_planner)/config/piper_param.yaml"/>
+                <rosparam if="$(arg use_urdf_collision_b)" file="$(find remani_planner)/config/fixed_collision_spheres_b.yaml"/>
+                <param name="mm/fixed_collision_spheres_enable" value="$(arg use_urdf_collision_b)" type="bool"/>
                 <param name="publish_tf" value="false" />
                 <remap from="~command" to="planning/pos_cmd"/>
                 <remap from="~odometry" to="$(arg odometry_topic)"/>

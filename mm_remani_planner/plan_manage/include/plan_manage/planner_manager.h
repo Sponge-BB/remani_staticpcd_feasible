@@ -33,7 +33,8 @@ namespace remani_planner
         const Eigen::VectorXd &start_jerk, const double start_yaw, const int start_singul, const bool start_gripper, const double trajectory_start_time, 
         const Eigen::VectorXd &end_pt, const Eigen::VectorXd &end_vel ,const Eigen::VectorXd &end_acc, double end_yaw, const bool local_target_gripper,
         const bool flag_polyInit, const bool flag_randomPolyTraj,
-        const bool have_local_traj, double &init_time, double &opt_time);
+        const bool have_local_traj, double &init_time, double &opt_time,
+        const bool wait_for_start = true);
     bool computeInitReferenceState(const Eigen::VectorXd &start_pt, const Eigen::VectorXd &start_vel, 
                                     const Eigen::VectorXd &start_acc, const Eigen::VectorXd &start_jerk,
                                     const double start_yaw, const int start_singul, const bool start_gripper,
@@ -45,10 +46,12 @@ namespace remani_planner
     bool planGlobalTrajWaypoints(
         const Eigen::VectorXd &start_pos, const double start_yaw, const Eigen::VectorXd &start_vel, const Eigen::VectorXd &start_acc,
         const std::vector<Eigen::VectorXd> &waypoints, const double end_yaw, const Eigen::VectorXd &end_vel, const Eigen::VectorXd &end_acc);
-    void getLocalTarget(
+    bool getLocalTarget(
         const double planning_horizen, const Eigen::VectorXd &start_pt, const double &start_yaw,
         const Eigen::VectorXd &global_end_pt, const double global_end_yaw,
-        Eigen::VectorXd &local_target_pos, Eigen::VectorXd &local_target_vel,Eigen::VectorXd &local_target_acc, bool &reach_horizon);
+        Eigen::VectorXd &local_target_pos, Eigen::VectorXd &local_target_vel,
+        Eigen::VectorXd &local_target_acc, bool &reach_horizon,
+        bool project_from_current = false);
     void initPlanModules(ros::NodeHandle &nh, PlanningVisualization::Ptr vis = NULL);
     bool EmergencyStop(Eigen::VectorXd stop_pos, double stop_yaw, const int singul);
 

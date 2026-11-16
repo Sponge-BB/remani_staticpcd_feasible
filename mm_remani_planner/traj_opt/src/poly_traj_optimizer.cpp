@@ -25,6 +25,7 @@ namespace remani_planner
              mani_hold_disable_path_deviation_, 0.35);
     nh.param("optimization/max_iterations", max_iterations_, 300);
     nh.param("optimization/max_wall_time", max_wall_time_, 1.5);
+    nh.param("visualization/enable_heavy", heavy_visualization_enabled_, true);
     wei_mani_hold_ = std::max(0.0, wei_mani_hold_);
     mani_hold_disable_path_deviation_ =
         std::max(0.0, mani_hold_disable_path_deviation_);
@@ -273,6 +274,10 @@ namespace remani_planner
   }
 
   void PolyTrajOptimizer::displayBackEndMesh(const SingulTrajData &traj_data, bool init, bool gripper_close){
+    if(!heavy_visualization_enabled_){
+      return;
+    }
+
     Eigen::Vector3d car_state;
     Eigen::VectorXd joint_state;
     joint_state.resize(manipulator_dof_);
@@ -451,7 +456,7 @@ namespace remani_planner
     // double t = 0.00;  //do not skip the start point
     int coll_type;
     for (int i = 5; i < i_end; i++){
-      if(checkCollision(traj_data, t, coll_type)){
+      if(checkPlanningCollision(traj_data, t, coll_type)){
         if(coll_type == 0){
           ROS_WARN("car collision at time %f!", t);
         }else if (coll_type == 1){
@@ -482,12 +487,53 @@ namespace remani_planner
     return mm_config_->checkcollision(Eigen::Vector3d(pos(0), pos(1), yaw), pos.tail(manipulator_dof_), false, coll_type);
   }
 
+  bool PolyTrajOptimizer::checkPlanningCollision(
+      const SingulTrajData &traj, double t, int &coll_type)
+  {
+    Eigen::VectorXd pos = traj.getPos(t);
+    double yaw = traj.getCarAngle(t);
+    return mm_config_->checkPlanningCollision(
+        Eigen::Vector3d(pos(0), pos(1), yaw),
+        pos.tail(manipulator_dof_), false, coll_type);
+  }
+
   bool PolyTrajOptimizer::checkDynamicObstacleCollision(const SingulTrajData &traj, double t, int &coll_type)
+  {
+    return checkDynamicObstacleCollision(traj, t, coll_type, nullptr);
+  }
+
+  bool PolyTrajOptimizer::checkDynamicObstacleCollision(const SingulTrajData &traj, double t, int &coll_type,
+                                                       MMConfig::DynamicCollisionEvidence *evidence)
   {
     Eigen::VectorXd pos = traj.getPos(t);
     double yaw = traj.getCarAngle(t);
     return mm_config_->checkDynamicObstacleCollision(Eigen::Vector3d(pos(0), pos(1), yaw),
-                                                     pos.tail(manipulator_dof_), false, coll_type);
+                                                     pos.tail(manipulator_dof_), false, coll_type, evidence);
+  }
+
+  bool PolyTrajOptimizer::checkPredictedDynamicObstacleCollision(
+      const SingulTrajData &traj, double t,
+      const plan_env::DynamicPointSnapshot &snapshot,
+      int &coll_type, bool &query_valid)
+  {
+    ros::Time query_time;
+    query_time.fromSec(traj.start_time + t);
+    return checkPredictedDynamicObstacleCollision(
+        traj, t, query_time, snapshot, coll_type, query_valid);
+  }
+
+  bool PolyTrajOptimizer::checkPredictedDynamicObstacleCollision(
+      const SingulTrajData &traj, double t,
+      const ros::Time &query_time,
+      const plan_env::DynamicPointSnapshot &snapshot,
+      int &coll_type, bool &query_valid)
+  {
+    Eigen::VectorXd pos = traj.getPos(t);
+    double yaw = traj.getCarAngle(t);
+    return mm_config_->checkPredictedDynamicObstacleCollision(
+        Eigen::Vector3d(pos(0), pos(1), yaw),
+        pos.tail(manipulator_dof_), query_time, snapshot, false,
+        coll_type, query_valid);
   }
 
   /* callbacks by the L-BFGS optimizer */
@@ -961,8 +1007,8 @@ namespace remani_planner
     mm_config_->getCarPtsGradNew(pos.head(2), vel.head(2), singul_container_[trajid], Eigen::Vector3d(0, 0, 0), car_pts, car_dPtsdYaw_list);
     for(unsigned int i = 0; i < car_pts.size(); ++i){
       Eigen::Vector3d dist_grad;
-      grid_map_->evaluateEDTWithGrad(car_pts[i], dist, dist_grad);
-      dist_err = mobile_base_check_radius_ + safe_margin_ - dist;
+      grid_map_->evaluatePlanningEDTWithGrad(car_pts[i], dist, dist_grad);
+      dist_err = mm_config_->getBaseSphereRadius(i) + safe_margin_ - dist;
       if (dist_err > 0){
         dist_err_2 = dist_err * dist_err;
         dist_err_3 = dist_err_2 * dist_err;
@@ -1024,7 +1070,8 @@ namespace remani_planner
       for(int j = 0; j < pts_size; ++j){
         pt_on_link = (T_now * manipulator_link_pts_[i].col(j)).head(3);
         Eigen::Vector3d dist_grad;
-        grid_map_->evaluateEDTWithGrad(pt_on_link, dist, dist_grad);
+        grid_map_->evaluatePlanningEDTWithGrad(
+            pt_on_link, dist, dist_grad);
         dist_err = manipulator_thickness_ + safe_margin_mani_ - dist;
         if(dist_err > 0){
           ret = true;
@@ -1069,6 +1116,10 @@ namespace remani_planner
     T_grad_list_self[0] = T_q_0_ * T_joint_grad[0];
     mm_config_->getCarPts(Eigen::Vector3d::Zero(), car_pts, Eigen::Vector3d::Zero());
     double factor2 = 1.0;
+    // Fixed-structure balls include the arm mount. Match the native hard-check
+    // adjacency rule for Piper; retain legacy box and arm-arm behavior.
+    const int base_arm_check_start =
+        mm_config_->hasCustomBaseSpheres() && !mm_config_->getUseFastArmer() ? 2 : 1;
     for(int i = 1; i < manipulator_dof_; ++i){ // car will not collide with link 0
       for(int j = 0; j < i; ++j){
         T_grad_list_self[j] = T_grad_list_self[j] * T_joint[i];
@@ -1081,9 +1132,9 @@ namespace remani_planner
       for(int j = 0; j < pts_size; ++j){
         // with car
         pt_on_link = (T_now * manipulator_link_pts_[i].col(j)).head(3);
-        for(unsigned int m = 0; m < car_pts.size(); ++m){
+        for(unsigned int m = 0; i >= base_arm_check_start && m < car_pts.size(); ++m){
           dist = (car_pts[m] - pt_on_link).norm(); // coarse distance
-          dist_err = manipulator_thickness_ + mobile_base_check_radius_ + self_safe_margin_ - dist; //refine distance
+          dist_err = manipulator_thickness_ + mm_config_->getBaseSphereRadius(m) + self_safe_margin_ - dist; //refine distance
           if(dist_err > 0){
             dist_err_2 = dist_err * dist_err;
             dist_err_3 = dist_err_2 * dist_err;
@@ -1412,6 +1463,10 @@ namespace remani_planner
   }
 
   void PolyTrajOptimizer::displayFrontEndMesh(std::vector<Eigen::VectorXd> &simple_path_full, vector<double> &yaw_list){
+    if(!heavy_visualization_enabled_){
+      return;
+    }
+
     Eigen::Vector3d car_state;
     Eigen::VectorXd joint_state;
     joint_state.resize(manipulator_dof_);

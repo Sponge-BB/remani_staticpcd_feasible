@@ -68,13 +68,15 @@ def make_pointcloud_msg(frame_id, seq, points, fields, point_step):
 class ShiftedPcdPublisher:
     def __init__(self):
         self.pcd_file = rospy.get_param("~pcd_file")
+        self.input_is_preprocessed = rospy.get_param("~input_is_preprocessed", False)
+        if not isinstance(self.input_is_preprocessed, bool):
+            raise RuntimeError("~input_is_preprocessed must be a ROS bool")
         self.robot_x = rospy.get_param("~robot_map_x", 0.0)
         self.robot_y = rospy.get_param("~robot_map_y", 0.0)
         self.robot_z = rospy.get_param("~robot_map_z", 0.0)
         self.map_roll = rospy.get_param("~map_roll", 0.0)
         self.map_pitch = rospy.get_param("~map_pitch", 0.0)
         self.map_yaw = rospy.get_param("~map_yaw", 0.0)
-        self.publish_rate = rospy.get_param("~publish_rate", 5.0)
         self.viz_stride = max(1, int(rospy.get_param("~viz_stride", 5)))
         self.voxel_res = rospy.get_param("~voxel_res", 0.08)
         self.min_voxel_points = rospy.get_param("~min_voxel_points", 2)
@@ -149,6 +151,12 @@ class ShiftedPcdPublisher:
         self.viz_msg = None
 
         self.raw_arr, self.field_names = self.load_binary_pcd(self.pcd_file)
+        if self.input_is_preprocessed and self.field_names != ["x", "y", "z"]:
+            raise RuntimeError(
+                "~input_is_preprocessed=true requires an XYZ-only binary PCD; "
+                "got fields: %s" % self.field_names)
+        if self.input_is_preprocessed and not np.isfinite(self.raw_arr).all():
+            raise RuntimeError("Preprocessed PCD contains non-finite XYZ values")
         self.intensity_idx = self.find_intensity_index(self.field_names)
         self.T_world_map = self.initial_transform()
 
@@ -188,6 +196,17 @@ class ShiftedPcdPublisher:
             "Auto ICP validation=%s min_improvement=%.3fm max_fitness_drop=%.3f",
             self.auto_icp_adjust_validate, self.auto_icp_adjust_min_improvement,
             self.auto_icp_adjust_max_fitness_drop)
+        if self.input_is_preprocessed:
+            rospy.loginfo(
+                "Preprocessed XYZ map enabled: %d points; runtime only applies the "
+                "robot_map/map_rpy rigid transform. Height, outlier, density and "
+                "voxel filters are bypassed. Input coordinates must be in the "
+                "pre-transform map-input frame.",
+                len(self.raw_arr))
+        if self.intensity_idx is None:
+            rospy.loginfo(
+                "PCD has no intensity field; /map_generator/global_cloud_viz "
+                "uses world Z as a synthetic intensity for RViz compatibility.")
 
     @staticmethod
     def load_binary_pcd(pcd_file):
@@ -683,7 +702,12 @@ class ShiftedPcdPublisher:
 
     def rebuild_messages_locked(self):
         arr = self.transform_raw_points_locked()
-        arr, remni_arr = self.filter_and_downsample(arr)
+        if self.input_is_preprocessed:
+            # The offline artifact already contains the exact planner points.  Keep
+            # all runtime corrections cheap and rigid: transform, serialize, publish.
+            remni_arr = arr[:, :3]
+        else:
+            arr, remni_arr = self.filter_and_downsample(arr)
 
         xyz_fields = [
             PointField("x", 0, PointField.FLOAT32, 1),
@@ -702,8 +726,18 @@ class ShiftedPcdPublisher:
             self.viz_msg = make_pointcloud_msg(
                 "world", self.map_version, viz_data, viz_fields, 16)
         else:
+            # Keep the planner and ICP clouds compact XYZ-only, but retain the
+            # historical RViz contract on the visualization-only topic.  The
+            # existing distributed RViz setup selects the Intensity transformer;
+            # using Z as its scalar keeps that setup usable without pretending
+            # that the offline planner artifact contains reflectivity.
+            viz_data = np.zeros((len(viz), 4), dtype=np.float32)
+            viz_data[:, :3] = viz[:, :3]
+            viz_data[:, 3] = viz[:, 2]
+            viz_fields = xyz_fields + [
+                PointField("intensity", 12, PointField.FLOAT32, 1)]
             self.viz_msg = make_pointcloud_msg(
-                "world", self.map_version, viz[:, :3], xyz_fields, 12)
+                "world", self.map_version, viz_data, viz_fields, 16)
 
     def publish_locked(self):
         now = rospy.Time.now()

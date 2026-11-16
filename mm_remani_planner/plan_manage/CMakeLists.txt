@@ -4,10 +4,13 @@ project(remani_planner)
 set(CMAKE_BUILD_TYPE "Release")
 
 ADD_COMPILE_OPTIONS(-std=c++14 )
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -g")
+# Full debug information pushes this target over the vehicle's build RAM
+# budget. Keep optimized deployment code without full symbol information.
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall")
 
 find_package(Eigen3 REQUIRED)
 find_package(PCL 1.7 REQUIRED)
+find_package(OpenCV REQUIRED)
 find_package(ompl QUIET)
 
 find_package(catkin REQUIRED COMPONENTS
@@ -38,6 +41,7 @@ include_directories(
   ${catkin_INCLUDE_DIRS} ${PROJECT_SOURCE_DIR}/include
   ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
   ${OMPL_INCLUDE_DIRS}
 )
 
@@ -55,8 +59,8 @@ add_executable(remani_planner_node
   )
 target_link_libraries(remani_planner_node
   ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBRARIES}
   vis_utils
   ${OMPL_LIBRARIES}
   )
-
-

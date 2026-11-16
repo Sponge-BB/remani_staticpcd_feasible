@@ -72,6 +72,7 @@ namespace remani_planner
     double max_wall_time_ = 1.5;
     ros::WallTime optimization_start_wall_time_;
     bool mani_hold_enabled_ = false;
+    bool heavy_visualization_enabled_ = true;
     Eigen::VectorXd mani_hold_reference_;
 
     std::shared_ptr<GridMap> grid_map_;
@@ -152,8 +153,26 @@ namespace remani_planner
     inline void setMaxWallTime(double max_wall_time) {
       max_wall_time_ = std::max(0.2, max_wall_time);
     }
+    inline double getAstarMaxSearchTime() const {
+      return kino_a_star_->getMaxSearchTime();
+    }
+    inline void setAstarMaxSearchTime(double max_search_time) {
+      kino_a_star_->setMaxSearchTime(max_search_time);
+    }
     bool checkCollision(const SingulTrajData &traj, double t, int &coll_type);
+    bool checkPlanningCollision(const SingulTrajData &traj, double t, int &coll_type);
     bool checkDynamicObstacleCollision(const SingulTrajData &traj, double t, int &coll_type);
+    bool checkDynamicObstacleCollision(const SingulTrajData &traj, double t, int &coll_type,
+                                       MMConfig::DynamicCollisionEvidence *evidence);
+    bool checkPredictedDynamicObstacleCollision(
+        const SingulTrajData &traj, double t,
+        const plan_env::DynamicPointSnapshot &snapshot,
+        int &coll_type, bool &query_valid);
+    bool checkPredictedDynamicObstacleCollision(
+        const SingulTrajData &traj, double t,
+        const ros::Time &query_time,
+        const plan_env::DynamicPointSnapshot &snapshot,
+        int &coll_type, bool &query_valid);
 
     /* main planning API */
     bool OptimizeTrajectory_lbfgs(const std::vector<Eigen::MatrixXd> &iniStates_container, 

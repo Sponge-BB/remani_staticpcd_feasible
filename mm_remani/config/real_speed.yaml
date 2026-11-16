@@ -11,7 +11,8 @@ remani_planner_node:
     #   5.0  → 0.35 m/s   7.14 → 0.50 m/s   10.0 → 0.70 m/s (原厂极速)
     mobile_base_max_wheel_omega: 3.28
     # 最大轮子角加速度 (rad/s²)，公式：线加速度 = alpha × 轮子半径
-    mobile_base_max_wheel_alpha: 15.0
+    # 与 Tracker 0.35m/s² 的真实限幅对齐；0.07m轮径下约为0.30m/s²。
+    mobile_base_max_wheel_alpha: 4.25
     # 底盘最小非奇异速度 (m/s)，避免差速模型在零速附近的奇异性
     mobile_base_non_singul_vel: 0.05
     # fixed_vel=15 时实测关节速度约 0.45rad/s，规划模型不得高估执行能力。
@@ -29,7 +30,7 @@ remani_planner_node:
     replan_feedback_yaw_threshold: 0.15
     replan_feedback_arm_threshold: 0.10
     # 轨迹结束后必须由真实整机状态确认到达，避免急停轨迹被误判为目标轨迹。
-    goal_position_tolerance: 0.10
+    goal_position_tolerance: 0.15
     goal_yaw_tolerance: 0.15
     goal_arm_tolerance: 0.12
     # 轨迹结束后由底盘低速补齐终点朝向；超时后手动目标按位置到达收尾。
@@ -37,6 +38,15 @@ remani_planner_node:
     actual_state_collision_check_interval: 0.05
     # 当前真实底盘只在几何轮廓进入 1cm 紧急余量时硬停，规划安全边界保持不变。
     actual_base_emergency_margin: 0.01
+    # 动态障碍只重建机器人前方的短局部段，而不重算整条全局路径。
+    # 将 enable 设为 false 可在不回退代码的情况下恢复原有全路径 A* 逻辑。
+    dynamic_local_replan_enable: true
+    dynamic_replan_hold_arm: true
+    dynamic_replan_horizon: 2.0
+    # 规划器同步执行有界A*时，独立控制器进程继续执行旧轨迹；给候选轨迹保留足够的未来拼接余量。
+    dynamic_replan_handoff_time: 0.70
+    dynamic_astar_search_time: 0.45
+    dynamic_astar_replan_wall_time: 0.60
     # 靠近目标时停止重规划的距离阈值 (米)
     thresh_no_replan_meter: 1.0
     # 紧急停车时间窗口 (秒)，碰撞距离<此值时触发急停
@@ -53,14 +63,10 @@ remani_planner_node:
     global_plan_dynamic_immediate_confirm_distance: 1.0
     global_plan_dynamic_confirm_frames: 2
     global_plan_dynamic_confirm_timeout: 0.60
-    # 短暂漏检时保持限速；连续动态事件最多规划两次，避免沿障碍物反复抖动。
+    # 同一动态事件按最新感知代次合并请求，并以该间隔限制重试频率。
     global_plan_dynamic_clear_hold_time: 0.80
-    global_plan_dynamic_replan_hold_time: 3.00
+    global_plan_dynamic_replan_hold_time: 0.35
     global_plan_dynamic_same_obstacle_radius: 0.45
-    # First deform the old trajectory briefly, then enter A* without a long blind wait.
-    global_plan_dynamic_retry_interval: 0.10
-    global_plan_dynamic_fast_replan_wall_time: 0.60
-    global_plan_dynamic_max_replans_per_event: 2
     # 障碍物进入空间前视后先连续限速，只有进入动态制动距离才急停。
     global_plan_dynamic_slowdown_distance: 2.0
     global_plan_dynamic_slowdown_min_speed: 0.08
@@ -90,14 +96,8 @@ remani_planner_node:
     max_seach_time: 0.9
     # 实车默认关闭 A* 扩展节点调试发布，保留最终搜索路径和优化轨迹。
     visualize_search: false
-    # 允许短暂倒车调整姿态，但拒绝整条轨迹全为倒车的候选。
+    # 保留 Reeds-Shepp 前进/倒车搜索；较高的倒车与换挡代价负责优先选择前进。
     allow_reverse: true
-    require_forward_segment: true
-    rear_goal_forward_only_distance: 0.50
-    rear_goal_forward_only_cos: -0.20
-    rear_goal_max_reverse_distance: 0.65
-    rear_goal_reverse_activation_forward_distance: 0.15
-    rear_goal_max_gear_switches: 1
     # 桥下等场景给机械臂采样更多预算，避免找到底盘路线后机械臂无解。
     max_mani_search_time: 0.12
     # 将关节余量纳入段时间分配，保证桥下避障动作能在底盘到达前完成。
@@ -138,6 +138,16 @@ piper_ctrl_single_node:
 
 mm_controller_node:
   controller:
+    # 参考轨迹不再按固定墙钟时间向前跑。底盘开始落后时先连续降速，
+    # 到停止阈值后冻结虚拟时间，等反馈追上再通过滞回阈值恢复。
+    base_tracking_slow_distance: 0.08
+    base_tracking_stop_distance: 0.16
+    base_tracking_resume_distance: 0.05
+    base_tracking_slow_yaw: 0.25
+    base_tracking_stop_yaw: 0.55
+    base_tracking_resume_yaw: 0.15
+    base_tracking_min_time_scale: 0.10
+    max_feedforward_omega: 0.55
     # 机械臂滞后时连续缩放整机轨迹时钟，让底盘等待机械臂完成避障。
     arm_tracking_slow_error: 0.10
     arm_tracking_stop_error: 0.25
@@ -155,15 +165,19 @@ real_base_tracker:
   tracker_max_w: 0.80  # 实车底盘最大转向速度 (rad/s)
   tracker_max_linear_accel: 0.35  # 追踪器线速度变化率上限 (m/s^2)
   tracker_max_angular_accel: 1.00 # 追踪器角速度变化率上限 (rad/s^2)
-  # 规划异常或旧轨迹请求倒车时，作为底盘前的最后一道保护
-  allow_reverse: false
+  control_rate: 50.0             # 与底盘串口发送频率一致，减小角速度阶梯
   # 规划器或控制器停止发布后，超时自动发布零速度。
   command_timeout: 0.30
   # 定位过期或实际轨迹偏差严重时才停车，普通滚动重规划不会触发。
   odom_timeout: 0.25
   odom_header_timeout: 0.25
-  tracking_stop_distance: 0.18
-  tracking_stop_yaw: 0.50
+  # Soft threshold is debounced for 5 control cycles (0.1s at 50Hz).  The
+  # separate hard envelope remains immediate.
+  tracking_stop_distance: 0.22
+  tracking_stop_yaw: 0.70
+  tracking_fault_confirm_frames: 5
+  tracking_hard_stop_distance: 0.35
+  tracking_hard_stop_yaw: 1.20
   tracking_recover_distance: 0.08
   tracking_recover_yaw: 0.25
   tracking_recover_frames: 5
@@ -172,12 +186,13 @@ real_base_tracker:
   goal_yaw_tolerance: 0.10
   goal_speed_tolerance: 0.05
   final_alignment_position_tolerance: 0.10
-  final_alignment_max_angular_speed: 0.25
+  final_alignment_max_angular_speed: 0.45
   final_alignment_k_yaw: 1.0
-  # 默认不执行长距离倒车，只允许重规划交接时的小幅、低速回退校正。
-  local_reverse_recovery: true
-  local_reverse_max_distance: 0.15
-  local_reverse_max_lateral_error: 0.08
-  local_reverse_max_yaw_error: 0.35
-  local_reverse_max_speed: 0.08
-  local_reverse_max_travel: 0.70
+  # Start/cusp/reverse handoffs may rotate the trajectory tangent while the
+  # reference is almost stationary. Rotate in place within this envelope;
+  # outside it, the original position/yaw fault protection remains active.
+  turn_alignment_position_tolerance: 0.10
+  turn_alignment_max_reference_speed: 0.08
+  # 进入后不因参考速度在 0.08m/s 附近波动而退出；航向收敛后再平滑恢复。
+  turn_alignment_exit_yaw: 0.07
+  turn_alignment_min_angular_speed: 0.12

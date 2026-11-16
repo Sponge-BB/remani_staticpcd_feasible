@@ -1,4 +1,5 @@
 #include "mm_controller/mm_controller_fsm.hpp"
+#include <stdexcept>
 using namespace std;
 
 namespace MMController{
@@ -10,6 +11,19 @@ MMControllerFSM::MMControllerFSM(const ros::NodeHandle& nh) : nh_(nh){
 	nh_.param("controller/curvature_ff_start_speed", curvature_ff_start_speed_, 0.04);
 	nh_.param("controller/curvature_ff_full_speed", curvature_ff_full_speed_, 0.10);
 	nh_.param("controller/max_feedforward_omega", max_feedforward_omega_, 0.60);
+	nh_.param("controller/use_mppi_execution_limits", base_execution_limits_.enabled, false);
+	if(base_execution_limits_.enabled) {
+		const bool have_limits =
+			nh_.getParam("/whole_body_mppi/base_limits/vmax", base_execution_limits_.linear) &&
+			nh_.getParam("/whole_body_mppi/base_limits/wmax", base_execution_limits_.angular) &&
+			nh_.getParam("/whole_body_mppi/base_limits/wheel_v", base_execution_limits_.wheel) &&
+			nh_.getParam("/whole_body_mppi/base_limits/track", base_execution_limits_.track);
+		if(!have_limits || baseExecutionTimeScale(Eigen::Vector2d::Zero(),
+		    Eigen::Vector2d::Zero(), 0.0, base_execution_limits_) != 1.0) {
+			ROS_FATAL("[MMctrl] MPPI execution limits are missing or invalid.");
+			throw std::invalid_argument("invalid MPPI execution limits");
+		}
+	}
 	nh_.param("controller/odom_timeout", odom_timeout_, 0.25);
 	nh_.param("controller/virtual_time_min_reference_speed", virtual_time_min_reference_speed_, 0.05);
 	nh_.param("controller/virtual_time_scale_rise_rate", virtual_time_scale_rise_rate_, 0.8);
@@ -19,6 +33,13 @@ MMControllerFSM::MMControllerFSM(const ros::NodeHandle& nh) : nh_(nh){
 	nh_.param("controller/arm_tracking_resume_error", arm_tracking_resume_error_, 0.06);
 	nh_.param("controller/arm_tracking_min_time_scale", arm_tracking_min_time_scale_, 0.10);
 	nh_.param("controller/arm_tracking_joint_timeout", arm_tracking_joint_timeout_, 0.25);
+	nh_.param("controller/base_tracking_slow_distance", base_tracking_slow_distance_, 0.08);
+	nh_.param("controller/base_tracking_stop_distance", base_tracking_stop_distance_, 0.16);
+	nh_.param("controller/base_tracking_resume_distance", base_tracking_resume_distance_, 0.05);
+	nh_.param("controller/base_tracking_slow_yaw", base_tracking_slow_yaw_, 0.25);
+	nh_.param("controller/base_tracking_stop_yaw", base_tracking_stop_yaw_, 0.55);
+	nh_.param("controller/base_tracking_resume_yaw", base_tracking_resume_yaw_, 0.15);
+	nh_.param("controller/base_tracking_min_time_scale", base_tracking_min_time_scale_, 0.10);
 	nh_.param("controller/terminal_yaw_sample_window", terminal_yaw_sample_window_, 1.0);
 	nh_.param("controller/terminal_yaw_min_speed", terminal_yaw_min_speed_, 0.01);
 	yaw_hold_speed_ = std::max(0.0, yaw_hold_speed_);
@@ -38,14 +59,29 @@ MMControllerFSM::MMControllerFSM(const ros::NodeHandle& nh) : nh_(nh){
 	arm_tracking_min_time_scale_ =
 		std::max(0.0, std::min(1.0, arm_tracking_min_time_scale_));
 	arm_tracking_joint_timeout_ = std::max(0.05, arm_tracking_joint_timeout_);
+	base_tracking_slow_distance_ = std::max(0.01, base_tracking_slow_distance_);
+	base_tracking_stop_distance_ = std::max(
+		base_tracking_slow_distance_ + 0.01, base_tracking_stop_distance_);
+	base_tracking_resume_distance_ = std::max(
+		0.0, std::min(base_tracking_slow_distance_, base_tracking_resume_distance_));
+	base_tracking_slow_yaw_ = std::max(0.01, base_tracking_slow_yaw_);
+	base_tracking_stop_yaw_ = std::max(
+		base_tracking_slow_yaw_ + 0.01, base_tracking_stop_yaw_);
+	base_tracking_resume_yaw_ = std::max(
+		0.0, std::min(base_tracking_slow_yaw_, base_tracking_resume_yaw_));
+	base_tracking_min_time_scale_ = std::max(
+		0.0, std::min(1.0, base_tracking_min_time_scale_));
 	terminal_yaw_sample_window_ = std::max(0.05, terminal_yaw_sample_window_);
 	terminal_yaw_min_speed_ = std::max(1e-4, terminal_yaw_min_speed_);
 	safety_speed_limit_ = -1.0;
 	virtual_traj_time_ = 0.0;
 	virtual_time_scale_ = 1.0;
 	max_arm_tracking_error_ = 0.0;
+	base_tracking_position_error_ = 0.0;
+	base_tracking_yaw_error_ = 0.0;
 	terminal_yaw_ = 0.0;
 	arm_tracking_hold_active_ = false;
+	base_tracking_hold_active_ = false;
 	have_terminal_yaw_ = false;
 	active_trajectory_seq_ = 0;
 	last_virtual_clock_stamp_ = ros::Time(0);
@@ -69,6 +105,7 @@ MMControllerFSM::MMControllerFSM(const ros::NodeHandle& nh) : nh_(nh){
     traj_start_trigger_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("/traj_start_trigger", 10);
 	trajectory_progress_pub_ = nh_.advertise<geometry_msgs::Vector3Stamped>("trajectory_progress", 1);
 	arm_tracking_error_pub_ = nh_.advertise<std_msgs::Float64>("arm_tracking_error", 1);
+	base_tracking_error_pub_ = nh_.advertise<geometry_msgs::Vector3Stamped>("base_tracking_error", 1);
 
 	state_data.setParam(manipulator_dof_);
 	fsm_state_ = AUTO_STAY;
@@ -102,7 +139,14 @@ MMControllerFSM::MMControllerFSM(const ros::NodeHandle& nh) : nh_(nh){
 void MMControllerFSM::process(){
 	// return;
 	ros::Time now_time = ros::Time::now();
-	if(!state_data.have_car_ || !state_data.have_mani_) return;
+	if(!state_is_received(now_time)){
+		// A feedback failure is not an ordinary reference pause. Do not keep
+		// publishing an old position goal with a new command timestamp.
+		virtual_time_scale_ = 0.0;
+		last_virtual_clock_stamp_ = now_time;
+		ROS_WARN_THROTTLE(1.0, "[MMctrl] Execution feedback unavailable/stale; suppressing commands.");
+		return;
+	}
 	syncTrajectoryClock(now_time);
 
 	static bool is_first_time = true;
@@ -247,8 +291,9 @@ void MMControllerFSM::update_stay_state(bool mani_goto_init){
 }
 
 bool MMControllerFSM::state_is_received(const ros::Time &now_time){
-	return (now_time - state_data.odom_rcv_stamp).toSec() < odom_timeout_ &&
-	       (now_time - state_data.joint_rcv_stamp).toSec() < odom_timeout_;
+	return state_data.have_car_ && state_data.have_mani_ &&
+	       State_Data_t::sourceFresh(state_data.odom_source_stamp, now_time, odom_timeout_) &&
+	       State_Data_t::sourceFresh(state_data.joint_source_stamp, now_time, arm_tracking_joint_timeout_);
 }
 
 void MMControllerFSM::safetySpeedLimitCallback(const std_msgs::Float64::ConstPtr &msg){
@@ -266,7 +311,10 @@ void MMControllerFSM::syncTrajectoryClock(const ros::Time &now){
 	virtual_traj_time_ = 0.0;
 	virtual_time_scale_ = trajectory_data.exec_traj == 1 ? 1.0 : 0.0;
 	max_arm_tracking_error_ = 0.0;
+	base_tracking_position_error_ = 0.0;
+	base_tracking_yaw_error_ = 0.0;
 	arm_tracking_hold_active_ = false;
+	base_tracking_hold_active_ = false;
 	updateTerminalYaw();
 	last_virtual_clock_stamp_ = now;
 	trajectory_activation_stamp_ = now;
@@ -320,15 +368,99 @@ void MMControllerFSM::advanceTrajectoryClock(const ros::Time &now){
 	if(now < trajectory_activation_stamp_)
 		return;
 
-	double target_scale = 1.0;
+	const auto capacity_at = [this](double phase) {
+		if(!base_execution_limits_.enabled) return 1.0;
+		const double sample = std::min(phase, trajectory_data.singul_traj_data.duration);
+		return baseExecutionTimeScale(
+			trajectory_data.singul_traj_data.getVel(sample).head<2>(),
+			trajectory_data.singul_traj_data.getAcc(sample).head<2>(),
+			yaw_hold_speed_, base_execution_limits_);
+	};
+	const double execution_scale = capacity_at(virtual_traj_time_);
+	double target_scale = execution_scale;
 	bool force_freeze = false;
 	const bool odom_fresh =
-		!state_data.odom_rcv_stamp.isZero() &&
-		(now - state_data.odom_rcv_stamp).toSec() <= odom_timeout_;
+		state_data.have_car_ && State_Data_t::sourceFresh(state_data.odom_source_stamp, now, odom_timeout_);
 	if(!odom_fresh){
 		force_freeze = true;
 		ROS_ERROR_THROTTLE(1.0, "[MMctrl] Odom stale; freezing trajectory clock.");
-	}else if(safety_speed_limit_ >= 0.0){
+	}else{
+		const double sample_time = std::min(
+			virtual_traj_time_, trajectory_data.singul_traj_data.duration);
+		const Eigen::VectorXd reference_position =
+			trajectory_data.singul_traj_data.getPos(sample_time);
+		const Eigen::VectorXd reference_velocity =
+			trajectory_data.singul_traj_data.getVel(sample_time);
+		base_tracking_position_error_ =
+			(reference_position.head(2) - state_data.car_p.head(2)).norm();
+
+		// The controller deliberately holds measured yaw around a stationary
+		// trajectory sample, so such a sample must not create a false yaw error.
+		base_tracking_yaw_error_ = 0.0;
+		if(reference_velocity.head(mobile_base_dof_).norm() > yaw_hold_speed_){
+			const int reference_singul =
+				trajectory_data.singul_traj_data.getSingul(sample_time);
+			const double reference_yaw = atan2(
+				reference_singul * reference_velocity(1),
+				reference_singul * reference_velocity(0));
+			base_tracking_yaw_error_ = std::fabs(atan2(
+				sin(reference_yaw - state_data.car_yaw),
+				cos(reference_yaw - state_data.car_yaw)));
+		}
+
+		if(base_tracking_hold_active_ &&
+		   base_tracking_position_error_ <= base_tracking_resume_distance_ &&
+		   base_tracking_yaw_error_ <= base_tracking_resume_yaw_){
+			base_tracking_hold_active_ = false;
+			ROS_INFO("[MMctrl] Base tracking recovered (position %.3f m, yaw %.3f rad).",
+			         base_tracking_position_error_, base_tracking_yaw_error_);
+		}else if(!base_tracking_hold_active_ &&
+		         (base_tracking_position_error_ >= base_tracking_stop_distance_ ||
+		          base_tracking_yaw_error_ >= base_tracking_stop_yaw_)){
+			base_tracking_hold_active_ = true;
+			ROS_WARN("[MMctrl] Base tracking lag (position %.3f m, yaw %.3f rad); freeze reference progress until feedback catches up.",
+			         base_tracking_position_error_, base_tracking_yaw_error_);
+		}
+
+		if(base_tracking_hold_active_){
+			target_scale = 0.0;
+			force_freeze = true;
+		}else{
+			double position_scale = 1.0;
+			if(base_tracking_position_error_ > base_tracking_slow_distance_){
+				const double ratio = std::max(0.0, std::min(
+					1.0, (base_tracking_stop_distance_ - base_tracking_position_error_) /
+					(base_tracking_stop_distance_ - base_tracking_slow_distance_)));
+				position_scale = base_tracking_min_time_scale_ +
+					ratio * (1.0 - base_tracking_min_time_scale_);
+			}
+			double yaw_scale = 1.0;
+			if(base_tracking_yaw_error_ > base_tracking_slow_yaw_){
+				const double ratio = std::max(0.0, std::min(
+					1.0, (base_tracking_stop_yaw_ - base_tracking_yaw_error_) /
+					(base_tracking_stop_yaw_ - base_tracking_slow_yaw_)));
+				yaw_scale = base_tracking_min_time_scale_ +
+					ratio * (1.0 - base_tracking_min_time_scale_);
+			}
+			target_scale = std::min(target_scale, std::min(position_scale, yaw_scale));
+			if(std::min(position_scale, yaw_scale) < 0.999){
+				ROS_WARN_THROTTLE(
+					1.0,
+					"[MMctrl] Base tracking lag position=%.3f m yaw=%.3f rad; scale whole-body progress to %.2f.",
+					base_tracking_position_error_, base_tracking_yaw_error_, target_scale);
+			}
+		}
+	}
+
+	geometry_msgs::Vector3Stamped base_error_msg;
+	base_error_msg.header.stamp = now;
+	base_error_msg.header.frame_id = "base_tracking_error";
+	base_error_msg.vector.x = base_tracking_position_error_;
+	base_error_msg.vector.y = base_tracking_yaw_error_;
+	base_error_msg.vector.z = base_tracking_hold_active_ ? 1.0 : 0.0;
+	base_tracking_error_pub_.publish(base_error_msg);
+
+	if(odom_fresh && safety_speed_limit_ >= 0.0){
 		const double sample_time = std::min(
 			virtual_traj_time_, trajectory_data.singul_traj_data.duration);
 		const Eigen::VectorXd reference_velocity =
@@ -346,8 +478,7 @@ void MMControllerFSM::advanceTrajectoryClock(const ros::Time &now){
 
 	const bool joint_fresh =
 		state_data.have_mani_ &&
-		!state_data.joint_rcv_stamp.isZero() &&
-		(now - state_data.joint_rcv_stamp).toSec() <= arm_tracking_joint_timeout_;
+		State_Data_t::sourceFresh(state_data.joint_source_stamp, now, arm_tracking_joint_timeout_);
 	if(!joint_fresh){
 		force_freeze = true;
 		ROS_ERROR_THROTTLE(1.0, "[MMctrl] Joint state stale; freezing trajectory clock.");
@@ -410,9 +541,15 @@ void MMControllerFSM::advanceTrajectoryClock(const ros::Time &now){
 			std::min(virtual_time_scale_ + max_change, target_scale));
 	}
 
+	// Rate smoothing cannot temporarily exceed the current executable envelope.
+	// This bounds the shared reference clock, not the physical actuator commands.
+	virtual_time_scale_ = std::min(virtual_time_scale_, execution_scale);
 	virtual_traj_time_ = std::min(
 		trajectory_data.singul_traj_data.duration,
 		virtual_traj_time_ + dt * virtual_time_scale_);
+	// Publish the advanced phase and its own limit as one consistent pair.
+	// Do not integrate a second time when curvature increases over this tick.
+	virtual_time_scale_ = std::min(virtual_time_scale_, capacity_at(virtual_traj_time_));
 }
 
 void MMControllerFSM::publishTrajectoryProgress(const ros::Time &stamp){
@@ -472,6 +609,7 @@ void MMControllerFSM::cal_traj_ctrl_input(double duration){
 	Eigen::VectorXd pos = trajectory_data.singul_traj_data.getPos(duration);
 	Eigen::VectorXd vel = trajectory_data.singul_traj_data.getVel(duration);
 	Eigen::VectorXd acc = trajectory_data.singul_traj_data.getAcc(duration);
+	const Eigen::VectorXd reference_vel = vel;
 	const double time_scale = std::max(0.0, std::min(1.0, virtual_time_scale_));
 	vel *= time_scale;
 	acc *= time_scale * time_scale;
@@ -480,9 +618,12 @@ void MMControllerFSM::cal_traj_ctrl_input(double duration){
 	cmd_data.car_true_cmd.resize(5);
 	cmd_data.car_true_cmd(0) = pos(0);
 	cmd_data.car_true_cmd(1) = pos(1);
-	const double base_speed = vel.head(mobile_base_dof_).norm();
-	if (base_speed > yaw_hold_speed_)
-			cmd_data.car_true_cmd(2) = atan2(last_singul_ * vel(1), last_singul_ * vel(0));
+	const double reference_base_speed =
+		reference_vel.head(mobile_base_dof_).norm();
+	if (reference_base_speed > yaw_hold_speed_)
+			cmd_data.car_true_cmd(2) = atan2(
+				last_singul_ * reference_vel(1),
+				last_singul_ * reference_vel(0));
 		else
 			cmd_data.car_true_cmd(2) = state_data.car_yaw;
 	cmd_data.car_true_cmd(3) = vel(0);
@@ -490,6 +631,7 @@ void MMControllerFSM::cal_traj_ctrl_input(double duration){
 
 	// desired angular velocity: omega = (vx*ay - vy*ax) / (vx^2+vy^2)
 	{
+		const double base_speed = vel.head(mobile_base_dof_).norm();
 		double v2 = vel(0) * vel(0) + vel(1) * vel(1);
 		if (base_speed > curvature_ff_start_speed_ && v2 > 1e-6) {
 			const double raw_omega = (vel(0) * acc(1) - vel(1) * acc(0)) / v2;

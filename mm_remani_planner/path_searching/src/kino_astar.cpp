@@ -33,13 +33,6 @@ void KinoAstar::setParam(ros::NodeHandle& nh, const std::shared_ptr<GridMap> &en
   nh.param("search/traj_steer_penalty", traj_steer_penalty_, 0.5);
   nh.param("search/traj_steer_change_penalty", traj_steer_change_penalty_, 0.0);
   nh.param("search/allow_reverse", allow_reverse_, true);
-  nh.param("search/require_forward_segment", require_forward_segment_, true);
-  nh.param("search/rear_goal_forward_only_distance", rear_goal_forward_only_distance_, 0.5);
-  nh.param("search/rear_goal_forward_only_cos", rear_goal_forward_only_cos_, -0.2);
-  nh.param("search/rear_goal_max_reverse_distance", rear_goal_max_reverse_distance_, 0.65);
-  nh.param("search/rear_goal_reverse_activation_forward_distance",
-           rear_goal_reverse_activation_forward_distance_, 0.15);
-  nh.param("search/rear_goal_max_gear_switches", rear_goal_max_gear_switches_, 1);
   nh.param("search/max_arc", max_arc_, 0.9);
   nh.param("search/oneshot_check_len", oneshot_check_len_, 0.2);
   
@@ -62,13 +55,6 @@ void KinoAstar::setParam(ros::NodeHandle& nh, const std::shared_ptr<GridMap> &en
   search_vis_stride_ = std::max(1, search_vis_stride_);
   search_vis_max_points_ = std::max(1, search_vis_max_points_);
   search_vis_publish_interval_ = std::max(1, search_vis_publish_interval_);
-  rear_goal_forward_only_distance_ = std::max(0.0, rear_goal_forward_only_distance_);
-  rear_goal_forward_only_cos_ = std::max(-1.0, std::min(1.0, rear_goal_forward_only_cos_));
-  rear_goal_max_reverse_distance_ = std::max(0.0, rear_goal_max_reverse_distance_);
-  rear_goal_reverse_activation_forward_distance_ =
-      std::max(0.0, rear_goal_reverse_activation_forward_distance_);
-  rear_goal_max_gear_switches_ = std::max(0, rear_goal_max_gear_switches_);
-  bounded_reverse_mode_ = false;
   nh.param("fsm/planning_horizon", planning_horizon_, 10.0);
 
   bool global_plan;
@@ -169,22 +155,6 @@ int KinoAstar::KinoAstarSearchAndGetSimplePath(const Eigen::VectorXd &start_pos,
   end_state(2) = end_yaw;
   end_state(3) = 0.0;
   end_state.tail(manipulator_dof_) = end_pos.tail(manipulator_dof_);
-
-  // Rear goals may use a short reverse setup, but the search budget below
-  // prevents a long blind reverse route.
-  const Eigen::Vector2d goal_offset = end_state.head(2) - start_state.head(2);
-  const double goal_distance = goal_offset.norm();
-  const Eigen::Vector2d heading(cos(start_yaw), sin(start_yaw));
-  const bool rear_far_goal =
-      goal_distance >= rear_goal_forward_only_distance_ && goal_distance > 1e-6 &&
-      heading.dot(goal_offset / goal_distance) <= rear_goal_forward_only_cos_;
-  const bool configured_allow_reverse = allow_reverse_;
-  bounded_reverse_mode_ =
-      configured_allow_reverse && require_forward_segment_ && rear_far_goal;
-  if (bounded_reverse_mode_) {
-    ROS_INFO("[kino astar] rear distant goal: allow up to %.2f m local reverse and %d gear switch.",
-             rear_goal_max_reverse_distance_, rear_goal_max_gear_switches_);
-  }
 
   mm_config_->visMM(local_start_goal_pub_, "start", 0, 0.8, start_state.head(3), start_state.tail(manipulator_dof_), start_gripper);
   mm_config_->visMM(local_start_goal_pub_, "gaol", 1, 0.8, end_state.head(3), end_state.tail(manipulator_dof_), end_gripper);
@@ -318,20 +288,6 @@ int KinoAstar::KinoAstarSearchAndGetSimplePath(const Eigen::VectorXd &start_pos,
     if(achieve_hori) break;
   }
   if(sample_succ){
-    const bool has_forward_segment = std::any_of(
-        singul_container.begin(), singul_container.end(),
-        [](const int singul) { return singul > 0; });
-    if(allow_reverse_ && require_forward_segment_ && !has_forward_segment){
-      ROS_WARN("[kino astar] rejected an all-reverse trajectory; retrying forward-only search.");
-      const bool reverse_was_enabled = allow_reverse_;
-      configureMotionModel(false);
-      const int forward_only_status = KinoAstarSearchAndGetSimplePath(
-          start_pos, start_vel, start_yaw, start_singul, start_gripper,
-          end_pos, end_vel, end_yaw, end_gripper, init_ctrl, continous_failures_count,
-          simple_path_container, yaw_list_container, singul_container, t_list_container);
-      configureMotionModel(reverse_was_enabled);
-      return forward_only_status;
-    }
     if(achieve_hori) return KinoAstar::REACH_HORIZON;
     else return KinoAstar::REACH_END;
   }else{
@@ -532,13 +488,17 @@ int KinoAstar::search(Eigen::VectorXd &start_state, const Eigen::VectorXd &end_s
   int coll_type;
   static const char* coll_type_name[] = {"car-obstacle", "arm-obstacle", "car-arm", "arm-self"};
   resetSearchVis();
-  if(mm_config_->checkcollision(start_state.head(3), start_state.tail(manipulator_dof_), false, coll_type)){
+  if(mm_config_->checkPlanningCollision(
+         start_state.head(3), start_state.tail(manipulator_dof_),
+         false, coll_type)){
     const char* name = (coll_type >= 0 && coll_type < 4) ? coll_type_name[coll_type] : "unknown";
     ROS_WARN("KinoAstar: start (%d:%s) is not free!", coll_type, name);
     return START_COLLISION;
   }
 
-  if(mm_config_->checkcollision(end_state.head(3), end_state.tail(manipulator_dof_), false, coll_type)){
+  if(mm_config_->checkPlanningCollision(
+         end_state.head(3), end_state.tail(manipulator_dof_),
+         false, coll_type)){
     const char* name = (coll_type >= 0 && coll_type < 4) ? coll_type_name[coll_type] : "unknown";
     ROS_WARN("KinoAstar: goal (%d:%s) is not free! end_state: [%.2f, %.2f, %.2f]", coll_type, name, end_state(0), end_state(1), end_state(2));
     return GOAL_COLLISION;
@@ -556,12 +516,6 @@ int KinoAstar::search(Eigen::VectorXd &start_state, const Eigen::VectorXd &end_s
   cur_node->g_score = 0.0;
   cur_node->input = Eigen::Vector2d(0.0, 0.0);
   cur_node->singul = getSingularity(start_state_(3));
-  if(bounded_reverse_mode_ &&
-     std::fabs(start_state_(3)) <= 1.5 * non_siguav_)
-    cur_node->singul = 0;
-  cur_node->reverse_distance = 0.0;
-  cur_node->forward_distance = 0.0;
-  cur_node->gear_switches = 0;
   cur_node->f_score = lambda_heu_ * getHeu(cur_node->state, end_state_.head(3));
   cur_node->node_state = IN_OPEN_SET;
   open_set_.push(cur_node);
@@ -600,7 +554,7 @@ int KinoAstar::search(Eigen::VectorXd &start_state, const Eigen::VectorXd &end_s
     double res_steer = 0.5;
     double res_arc = 0.5;
     if(!initsearch){
-      if(allow_reverse_ || start_state_[3] >= 0.0){
+      if(!allow_reverse_ || start_state_[3] >= 0.0){
         for(double arc = 1.0 * grid_interval_; arc <= 2.0 * grid_interval_ + 1e-3; arc += 1.0 * grid_interval_){
           if(fabs(arc) < 1.0e-2){
             continue;
@@ -635,27 +589,6 @@ int KinoAstar::search(Eigen::VectorXd &start_state, const Eigen::VectorXd &end_s
     }
     for (auto& input : inputs){
       const int singul = getSingularity(input[1]);
-      const bool gear_switch =
-          cur_node->singul != 0 && singul * cur_node->singul < 0;
-      const int next_gear_switches =
-          cur_node->gear_switches + (gear_switch ? 1 : 0);
-      const double next_reverse_distance =
-          cur_node->reverse_distance +
-          (singul < 0 ? std::fabs(input[1]) : 0.0);
-      const double next_forward_distance =
-          cur_node->forward_distance +
-          (singul > 0 ? std::fabs(input[1]) : 0.0);
-
-      if(bounded_reverse_mode_){
-        const bool reverse_started_too_late =
-            singul < 0 &&
-            cur_node->forward_distance >
-                rear_goal_reverse_activation_forward_distance_;
-        if(reverse_started_too_late ||
-           next_reverse_distance > rear_goal_max_reverse_distance_ + 1e-6 ||
-           next_gear_switches > rear_goal_max_gear_switches_)
-          continue;
-      }
 
       stateTransit(cur_state, input, pro_state);
       if(!sdf_map_->isInMap(Eigen::Vector2d(pro_state(0), pro_state(1)))){
@@ -686,7 +619,8 @@ int KinoAstar::search(Eigen::VectorXd &start_state, const Eigen::VectorXd &end_s
         tmpctrl << input[0], tmparc;
         stateTransit(cur_state, tmpctrl, xt);
         if(fabs(tmparc) >= 1e-4){
-          isocc = mm_config_->checkCarObsCollision(xt, false, false, min_dist);
+          isocc = mm_config_->checkCarPlanningObsCollision(
+              xt, false, false, min_dist);
         }
         if(isocc){break;}
       }
@@ -712,9 +646,6 @@ int KinoAstar::search(Eigen::VectorXd &start_state, const Eigen::VectorXd &end_s
         pro_node->parent = cur_node;
         pro_node->node_state = IN_OPEN_SET;
         pro_node->singul = singul;
-        pro_node->reverse_distance = next_reverse_distance;
-        pro_node->forward_distance = next_forward_distance;
-        pro_node->gear_switches = next_gear_switches;
         open_set_.push(pro_node);
 
         expanded_nodes_.insert(pro_id, pro_yaw_id, pro_node);
@@ -734,9 +665,6 @@ int KinoAstar::search(Eigen::VectorXd &start_state, const Eigen::VectorXd &end_s
           pro_node->input = input;
           pro_node->parent = cur_node;
           pro_node->singul = singul;
-          pro_node->reverse_distance = next_reverse_distance;
-          pro_node->forward_distance = next_forward_distance;
-          pro_node->gear_switches = next_gear_switches;
         }
       }else{
         std::cout << "[kino astar] error type in searching: " << pro_node->node_state << std::endl;
@@ -812,9 +740,6 @@ bool KinoAstar::is_shot_sucess(
     double min_dist;
     int dir_last = start_node->singul;
     int shot_switches = 0;
-    int total_gear_switches = start_node->gear_switches;
-    double reverse_distance = start_node->reverse_distance;
-    double forward_distance = start_node->forward_distance;
     for(unsigned int j = 0; j < path_list.size(); ++j){
       if(j < path_list.size() - 1){
         const Eigen::Vector2d delta =
@@ -826,35 +751,16 @@ bool KinoAstar::is_shot_sucess(
           const int dir_now = heading.dot(delta) >= 0.0 ? 1 : -1;
           if(dir_last != 0 && dir_last != dir_now){
             ++shot_switches;
-            ++total_gear_switches;
           }
-
-          if(bounded_reverse_mode_){
-            if(dir_now < 0 &&
-               forward_distance >
-                   rear_goal_reverse_activation_forward_distance_){
-              constraint_violation = true;
-              break;
-            }
-            if(dir_now < 0)
-              reverse_distance += segment_length;
-            else
-              forward_distance += segment_length;
-
-            if(reverse_distance >
-                   rear_goal_max_reverse_distance_ + 1e-6 ||
-               total_gear_switches > rear_goal_max_gear_switches_){
-              constraint_violation = true;
-              break;
-            }
-          }else if(shot_switches > 1){
+          if(shot_switches > 1){
             constraint_violation = true;
             break;
           }
           dir_last = dir_now;
         }
       }
-      if(mm_config_->checkCarObsCollision(path_list[j], false, false, min_dist)){
+      if(mm_config_->checkCarPlanningObsCollision(
+             path_list[j], false, false, min_dist)){
         is_occ = true;
         break;
       }
@@ -953,7 +859,9 @@ void KinoAstar::simplifyRoute(const std::vector<Eigen::Vector3d> &node_path,
         shotptr->interpolate(from(), to(), l / shotLength, s());
         reals = s.reals();
         SampleList_temp.push_back(Eigen::Vector3d(reals[0], reals[1], normalize_angle(reals[2])));
-        if(mm_config_->checkCarObsCollision(Eigen::Vector3d(reals[0], reals[1], normalize_angle(reals[2])), false, false, min_dist)){
+        if(mm_config_->checkCarPlanningObsCollision(
+               Eigen::Vector3d(reals[0], reals[1], normalize_angle(reals[2])),
+               false, false, min_dist)){
           shot_succ = false;
           break;
         }

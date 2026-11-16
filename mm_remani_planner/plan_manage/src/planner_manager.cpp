@@ -1,5 +1,9 @@
 // #include <fstream>
 #include <plan_manage/planner_manager.h>
+#include <plan_manage/mppi_collision_export.hpp>
+#include <algorithm>
+#include <cmath>
+#include <limits>
 #include <thread>
 #include "visualization_msgs/Marker.h" // zx-todo
 
@@ -47,6 +51,7 @@ namespace remani_planner
 
     mm_config_.reset(new MMConfig);
     mm_config_->setParam(nh, grid_map_);
+    mppi_collision_export::initialize(nh, grid_map_, mm_config_);
 
     pp_.max_vel_ = mm_config_->getBaseMaxVel();
     pp_.max_acc_ = mm_config_->getBaseMaxAcc();
@@ -274,19 +279,73 @@ namespace remani_planner
     return true;
   }
 
-  void MMPlannerManager::getLocalTarget(
+  bool MMPlannerManager::getLocalTarget(
       const double planning_horizen, const Eigen::VectorXd &start_pt, const double &start_yaw,
       const Eigen::VectorXd &global_end_pt, const double global_end_yaw, 
-      Eigen::VectorXd &local_target_pos, Eigen::VectorXd &local_target_vel,Eigen::VectorXd &local_target_acc, bool &reach_horizon)
+      Eigen::VectorXd &local_target_pos, Eigen::VectorXd &local_target_vel,
+      Eigen::VectorXd &local_target_acc, bool &reach_horizon,
+      bool project_from_current)
   {
     reach_horizon = true;
     double t;
+    local_target_pos = start_pt;
+    local_target_vel = Eigen::VectorXd::Zero(pp_.traj_dim_);
+    local_target_acc = Eigen::VectorXd::Zero(pp_.traj_dim_);
 
     traj_container_.global_traj.last_glb_t_of_lc_tgt = traj_container_.global_traj.glb_t_of_lc_tgt;
 
-    double t_step = planning_horizen / 20 / pp_.max_vel_;
-    for (t = traj_container_.global_traj.glb_t_of_lc_tgt;
-         t < (traj_container_.global_traj.global_start_time + traj_container_.global_traj.duration);
+    const double global_start = traj_container_.global_traj.global_start_time;
+    const double global_end = global_start + traj_container_.global_traj.duration;
+    const double safe_max_vel = std::max(0.05, pp_.max_vel_);
+    const double t_step = std::max(
+        0.02, std::min(0.20, planning_horizen / 20.0 / safe_max_vel));
+
+    double search_start = traj_container_.global_traj.glb_t_of_lc_tgt;
+    if (project_from_current)
+    {
+      // A global-plan run historically moves glb_t_of_lc_tgt all the way to
+      // the final goal.  A dynamic repair must instead start from the robot's
+      // current progress.  Re-project onto the global reference, preferring a
+      // heading-consistent branch when a path crosses itself.
+      double best_score = std::numeric_limits<double>::infinity();
+      double best_time = global_start;
+      constexpr double projection_step = 0.05;
+      for (double sample_time = global_start;
+           sample_time <= global_end + 1e-6;
+           sample_time += projection_step)
+      {
+        const double relative_time = std::min(
+            traj_container_.global_traj.duration,
+            std::max(0.0, sample_time - global_start));
+        const Eigen::VectorXd sample_pos =
+            traj_container_.global_traj.traj.getPos(relative_time);
+        const Eigen::VectorXd sample_vel =
+            traj_container_.global_traj.traj.getVel(relative_time);
+        const double position_error =
+            (sample_pos.head(2) - start_pt.head(2)).squaredNorm();
+        double heading_penalty = 0.0;
+        if (sample_vel.head(2).norm() > 1e-3)
+        {
+          const double sample_yaw = atan2(sample_vel(1), sample_vel(0));
+          const double yaw_error = atan2(
+              sin(sample_yaw - start_yaw), cos(sample_yaw - start_yaw));
+          heading_penalty = 0.02 * (1.0 - cos(yaw_error));
+        }
+        const double score = position_error + heading_penalty;
+        if (score < best_score)
+        {
+          best_score = score;
+          best_time = sample_time;
+        }
+      }
+      search_start = std::min(global_end, std::max(global_start, best_time));
+      ROS_INFO("[FSM] Dynamic local target projects global progress at %.2f/%.2f s.",
+               search_start - global_start,
+               traj_container_.global_traj.duration);
+    }
+
+    for (t = search_start;
+         t < global_end;
          t += t_step){
       Eigen::VectorXd pos_t = traj_container_.global_traj.traj.getPos(t - traj_container_.global_traj.global_start_time);
 
@@ -301,7 +360,11 @@ namespace remani_planner
           vel = traj_container_.global_traj.traj.getVel(t - traj_container_.global_traj.global_start_time);
           yaw = atan2(vel(1), vel(0));
         }
-        occ = mm_config_->checkcollision(Eigen::Vector3d(pos_t(0), pos_t(1), yaw), pos_t.tail(pp_.manipulator_dim_), false);
+        int target_coll_type = -1;
+        occ = mm_config_->checkPlanningCollision(
+            Eigen::Vector3d(pos_t(0), pos_t(1), yaw),
+            pos_t.tail(pp_.manipulator_dim_), false,
+            target_coll_type);
         if(occ) continue;
         local_target_pos = pos_t;
         traj_container_.global_traj.glb_t_of_lc_tgt = t;
@@ -309,10 +372,30 @@ namespace remani_planner
       }
     }
 
-    if ((t - traj_container_.global_traj.global_start_time) >= traj_container_.global_traj.duration){ // Last global point
-      local_target_pos = global_end_pt;
-      traj_container_.global_traj.glb_t_of_lc_tgt = traj_container_.global_traj.global_start_time + traj_container_.global_traj.duration;
-      reach_horizon = false;
+    if (t >= global_end){ // Last global point
+      int final_coll_type = -1;
+      const bool final_target_occupied =
+          mm_config_->checkPlanningCollision(
+              Eigen::Vector3d(global_end_pt(0), global_end_pt(1),
+                              global_end_yaw),
+              global_end_pt.tail(pp_.manipulator_dim_), false,
+              final_coll_type);
+      if (!final_target_occupied)
+      {
+        local_target_pos = global_end_pt;
+        traj_container_.global_traj.glb_t_of_lc_tgt =
+            traj_container_.global_traj.global_start_time +
+            traj_container_.global_traj.duration;
+        reach_horizon = false;
+      }
+      else
+      {
+        // Do not silently hand an occupied final point to Kino-A*. The caller
+        // retains the executing trajectory and retries from a newer snapshot.
+        ROS_WARN("[FSM] No planning-layer-free local target found (collision type=%d).",
+                 final_coll_type);
+        return false;
+      }
     }
 
     if ((global_end_pt - local_target_pos).norm() < (pp_.max_vel_ * pp_.max_vel_) / (2 * pp_.max_acc_)){
@@ -323,6 +406,7 @@ namespace remani_planner
       local_target_vel = traj_container_.global_traj.traj.getVel(t - traj_container_.global_traj.global_start_time);
       local_target_acc = traj_container_.global_traj.traj.getAcc(t - traj_container_.global_traj.global_start_time);
     }
+    return true;
   }
 
   bool MMPlannerManager::reboundReplan(
@@ -332,7 +416,8 @@ namespace remani_planner
       const Eigen::VectorXd &local_target_pt, const Eigen::VectorXd &local_target_vel,
       const Eigen::VectorXd &local_target_acc, double local_target_yaw, const bool local_target_gripper,
       const bool flag_polyInit, const bool flag_randomPolyTraj,
-      const bool have_local_traj, double &init_time, double &opt_time)
+      const bool have_local_traj, double &init_time, double &opt_time,
+      const bool wait_for_start)
   {
     static int count = 0;
 
@@ -467,7 +552,10 @@ namespace remani_planner
     double traj_start_time;
     if(have_local_traj){
       double delta_replan_time = trajectory_start_time - ros::Time::now().toSec();
-      if (delta_replan_time > 0) ros::Duration(delta_replan_time).sleep();
+      // Moving MPPI repairs are published ahead of activation. Its adapter
+      // retains the old reference until this unchanged future start stamp.
+      if (wait_for_start && delta_replan_time > 0)
+        ros::Duration(delta_replan_time).sleep();
       traj_start_time = trajectory_start_time;
     }
     else{

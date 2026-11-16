@@ -2,11 +2,13 @@
 #define _MM_CONFIG_HPP_
 
 #include <cmath>
+#include <cstddef>
 #include <Eigen/Eigen>
 #include <ros/ros.h>
 #include <ros/package.h>
 #include <memory>
 #include <string>
+#include <vector>
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 #include "plan_env/grid_map.h"
@@ -19,6 +21,16 @@ namespace remani_planner
     public:
         MMConfig() {}
         ~MMConfig() {}
+
+        struct DynamicCollisionEvidence {
+            GridMap::DynamicObstacleHit hit;
+            Eigen::Vector3d query = Eigen::Vector3d::Zero();
+            double threshold = 0.0;
+            int collision_type = -1;
+            int base_sphere = -1;
+            int arm_link = -1;
+            int arm_point = -1;
+        };
 
         int getManiDof() const {
             return manipulator_dof_;
@@ -63,14 +75,37 @@ namespace remani_planner
         void setParam(ros::NodeHandle &nh, const std::shared_ptr<GridMap>& env);
         bool checkCarObsCollision(Eigen::Vector3d car_state, bool precise, bool safe, double &min_dist);
         bool checkManiObsCollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe, double &min_dist);
+        bool checkCarPlanningObsCollision(Eigen::Vector3d car_state, bool precise, bool safe, double &min_dist);
+        bool checkManiPlanningObsCollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe, double &min_dist);
         bool checkCarDynamicObsCollision(Eigen::Vector3d car_state, bool safe, double &min_dist);
+        bool checkCarDynamicObsCollision(Eigen::Vector3d car_state, bool safe, double &min_dist,
+                                         DynamicCollisionEvidence *evidence);
         bool checkManiDynamicObsCollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe, double &min_dist);
+        bool checkManiDynamicObsCollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe, double &min_dist,
+                                          DynamicCollisionEvidence *evidence);
+        bool checkCarPredictedDynamicObsCollision(
+            Eigen::Vector3d car_state, const ros::Time &query_time,
+            const plan_env::DynamicPointSnapshot &snapshot, bool safe,
+            double &min_dist, bool &query_valid);
+        bool checkManiPredictedDynamicObsCollision(
+            Eigen::Vector3d car_state, Eigen::VectorXd mani_state,
+            const ros::Time &query_time,
+            const plan_env::DynamicPointSnapshot &snapshot, bool safe,
+            double &min_dist, bool &query_valid);
         bool checkCarManiCollision(Eigen::VectorXd mani_state, bool safe, double &min_dist);
         bool checkManiManiCollision(Eigen::VectorXd mani_state, bool safe, double &min_dist);
         bool checkManicollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe);
         bool checkcollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe);
         bool checkcollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe, int &coll_type /*0: car, 1: mani, 2: car-mani, 3: mani-mani*/);
+        bool checkPlanningCollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe, int &coll_type);
         bool checkDynamicObstacleCollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe, int &coll_type);
+        bool checkDynamicObstacleCollision(Eigen::Vector3d car_state, Eigen::VectorXd mani_state, bool safe, int &coll_type,
+                                           DynamicCollisionEvidence *evidence);
+        bool checkPredictedDynamicObstacleCollision(
+            Eigen::Vector3d car_state, Eigen::VectorXd mani_state,
+            const ros::Time &query_time,
+            const plan_env::DynamicPointSnapshot &snapshot, bool safe,
+            int &coll_type, bool &query_valid);
         void visMM(ros::Publisher &pub, std::string ns, int idx, double alpha, const Eigen::Vector3d &car_state, const Eigen::VectorXd &joint_state, const bool &gripper_close);
         void visMMCheckBall(ros::Publisher &pub, std::string ns, int idx, double alpha, const Eigen::Vector3d &car_state, const Eigen::VectorXd &joint_state);
         void getMMMarkerArray(visualization_msgs::MarkerArray &marker_array, std::string ns, int idx, double alpha, const Eigen::Vector3d &car_state, const Eigen::VectorXd &joint_state, const bool &gripper_close);
@@ -96,10 +131,22 @@ namespace remani_planner
         double getBaseCheckRadius() const {
             return mobile_base_check_radius_;
         }
+        double getBaseSphereRadius(std::size_t i) const {
+            return fixed_collision_spheres_.empty()
+                ? mobile_base_check_radius_ : fixed_collision_spheres_.at(i)(3);
+        }
+        double getBaseMaxCheckRadius() const {
+            return fixed_collision_spheres_.empty()
+                ? mobile_base_check_radius_ : fixed_collision_max_radius_;
+        }
+        bool hasCustomBaseSpheres() const {
+            return !fixed_collision_spheres_.empty();
+        }
         double getMapResolution() const {
             return map_resolution_;
         }
         double getCarObstacleMinDistance(const Eigen::Vector3d &car_state, bool precise);
+        double getCarObstacleMinSurfaceDistance(const Eigen::Vector3d &car_state, bool precise);
         bool getUseFastArmer() const {
             return useFastArmer_;
         }
@@ -112,6 +159,10 @@ namespace remani_planner
         int manipulator_dof_;
         double mobile_base_length_, mobile_base_width_, mobile_base_height_;
         double mobile_base_check_radius_;
+        // Ground-referenced base-local centres and physical radii.  Explicitly
+        // disabled by default, so stale sphere parameters cannot prevent rollback.
+        std::vector<Eigen::Vector4d> fixed_collision_spheres_;
+        double fixed_collision_max_radius_ = 0.0;
         double mobile_base_wheel_base_, mobile_base_wheel_radius_, mobile_base_max_wheel_omega_, mobile_base_max_wheel_alpha_;
         
         Eigen::VectorXd manipulator_config_;
@@ -123,6 +174,7 @@ namespace remani_planner
         double self_safe_margin_;
         double ground_safe_dis_;
         double mobile_base_max_vel_, mobile_base_max_acc_;
+        double dynamic_whole_body_broad_phase_radius_;
 
         Eigen::Matrix2d B_h_;
         Eigen::Matrix4d T_q_0_;
